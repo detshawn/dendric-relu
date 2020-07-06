@@ -44,7 +44,7 @@ def test_activation_functions():
     print(f'hypo(data): {hypo(t)}')
 
 
-def train(model, opt,
+def train(model, opt, device,
           train_dataloader, val_dataloader, val_set_ratio,
           epochs):
     mse_fn = torch.nn.MSELoss()
@@ -65,6 +65,8 @@ def train(model, opt,
             opt.zero_grad()
 
             x, target = data
+            x = x.to(device)
+            target = target.to(device)
 
             y, (cl, _) = model(x)
             mse_loss = mse_fn(y, x)
@@ -93,6 +95,8 @@ def train(model, opt,
                     val_iter = iter(val_dataloader)
                     val_data = next(val_iter)
                 val_x, val_target = val_data
+                val_x = val_x.to(device)
+                val_target = val_target.to(device)
                 with torch.no_grad():
                     val_y, (val_cl, _) = model(val_x)
                     val_mse_loss = mse_fn(val_y, val_x)
@@ -116,6 +120,9 @@ def train(model, opt,
 def test_MNIST():
     print('>>> MNIST test starts!')
 
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    batch_size = 8 if device is "cuda" else 4
+
     print('importing data ...')
     mndata = MNIST('../mnist')
     train_images, train_labels = mndata.load_testing()
@@ -130,11 +137,11 @@ def test_MNIST():
     print(f'=> len(train_dataset), len(val_dataset): {len(train_dataset)}, {len(val_dataset)}')
 
     train_dl = DataLoader(dataset=train_dataset,
-                          batch_size=4,
+                          batch_size=batch_size,
                           shuffle=True)
     print(f'len(train_dl): {len(train_dl)}')
     val_dl = DataLoader(dataset=val_dataset,
-                        batch_size=4,
+                        batch_size=batch_size,
                         shuffle=True)
     print(f'len(val_dl): {len(val_dl)}')
 
@@ -143,7 +150,7 @@ def test_MNIST():
     test_dataset = MNISTDataset(np.array(test_images), np.array(test_labels))
     print(f'len(test_dataset): {len(test_dataset)}')
     test_dl = DataLoader(dataset=test_dataset,
-                         batch_size=4,
+                         batch_size=batch_size,
                          shuffle=True)
     print(f'len(test_dl): {len(test_dl)}')
 
@@ -153,12 +160,13 @@ def test_MNIST():
                        layer_config={'encoder':[in_features, 256, 64, 8],
                                      'classifier':[8, 8, 10],
                                      'decoder':[8, 64, 256, in_features]})
+    model = model.to(device)
     print(model)
     opt = torch.optim.Adam(model.parameters(), 1e-3)
 
     print('training the model ...')
 
-    result = train(model=model, opt=opt,
+    result = train(model=model, opt=opt, device=device,
                    train_dataloader=train_dl,
                    val_dataloader=val_dl, val_set_ratio=val_set_ratio,
                    epochs=1)
@@ -179,6 +187,7 @@ def test_MNIST():
 
     tag = 'bn'
     plt.savefig(f'./losses_{tag}.png')
+
 
 def main():
     test_activation_functions()
