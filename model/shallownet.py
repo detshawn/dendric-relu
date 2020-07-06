@@ -8,7 +8,7 @@ class LinearNN(nn.Module):
         for i in range(0, len(layer_config)-1):
             layer = nn.Sequential()
             layer.add_module(f'l{i}', nn.Linear(in_features=layer_config[i], out_features=layer_config[i+1]))
-            layer.add_module(f'bn{i}', nn.GroupNorm(num_features=layer_config[i+1]))
+            layer.add_module(f'bn{i}', nn.BatchNorm1d(num_features=layer_config[i+1]))
             layers.append(layer)
         self.layers = nn.ModuleList(layers)
         self.do = nn.Dropout(p=0.2)
