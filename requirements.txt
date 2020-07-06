@@ -1,3 +1,5 @@
 pytouch
 torchvision
 tensorboard
+matplotlib
+python-mnist
