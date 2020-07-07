@@ -71,7 +71,7 @@ def train(model, opt, device,
 
             y, (cl, z_sample, z_mean, z_log_var) = model(x)
 
-            pred = (torch.argmax(cl) == target).detach().numpy().sum()
+            pred = (torch.argmax(cl, dim=1) == target).detach().numpy().sum()
             pred_cnt['total'] = pred_cnt['total'] + x.size()[0]
             pred_cnt['true'] = pred_cnt['true'] + pred
 
@@ -110,7 +110,7 @@ def train(model, opt, device,
                 val_target = val_target.to(device)
                 with torch.no_grad():
                     val_y, (val_cl, val_z_sample, val_z_mean, val_z_log_var) = model(val_x)
-                    val_pred = (torch.argmax(val_cl) == val_target).detach().numpy().sum()
+                    val_pred = (torch.argmax(val_cl, dim=1) == val_target).detach().numpy().sum()
                     val_pred_cnt['total'] = val_pred_cnt['total'] + val_x.size()[0]
                     val_pred_cnt['true'] = val_pred_cnt['true'] + val_pred
                     val_mse_loss = mse_fn(val_y, val_x)
