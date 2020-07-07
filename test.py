@@ -171,18 +171,20 @@ def test_MNIST():
                    val_dataloader=val_dl, val_set_ratio=val_set_ratio,
                    epochs=1)
 
-    fig = plt.figure()
+    fig, ax1 = plt.subplots(figsize=(15, 8))
+    ax2 = ax1.twinx()
     x = result['losses']['iter']
-    plt.semilogy(x, result['losses']['loss'], 'ro-')
-    plt.semilogy(x, result['losses']['mse_loss'], 'bo-')
-    plt.semilogy(x, result['losses']['ce_loss'], 'go-')
+    ax1.semilogy(x, result['losses']['loss'], 'ro-')
+    ax1.semilogy(x, result['losses']['mse_loss'], 'bo-')
+    ax1.semilogy(x, result['losses']['ce_loss'], 'go-')
 
     x = result['val_losses']['iter']
-    plt.semilogy(x, result['val_losses']['loss'], 'rx-.')
-    plt.semilogy(x, result['val_losses']['mse_loss'], 'bx-.')
-    plt.semilogy(x, result['val_losses']['ce_loss'], 'gx-.')
-    plt.legend(('loss', 'mse_loss', 'ce_loss', 'val_loss', 'val_mse_loss', 'val_ce_loss'))
-    plt.xlabel('iter')
+    ax1.semilogy(x, result['val_losses']['loss'], 'rx-.')
+    ax1.semilogy(x, result['val_losses']['mse_loss'], 'bx-.')
+    ax1.semilogy(x, result['val_losses']['ce_loss'], 'gx-.')
+
+    ax1.legend(('loss', 'mse_loss', 'ce_loss', 'val_loss', 'val_mse_loss', 'val_ce_loss'))
+    ax1.set_xlabel('iter')
     plt.grid()
 
     tag = 'bn'
