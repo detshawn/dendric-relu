@@ -53,12 +53,14 @@ def train(model, opt, device,
     display_step = 100
     eval_step = int(1/val_set_ratio)
 
-    losses = {'iter': [], 'loss': [], 'mse_loss': [], 'ce_loss': []}
-    val_losses = {'iter': [], 'loss': [], 'mse_loss': [], 'ce_loss': []}
+    losses = {'iter': [], 'loss': [], 'mse_loss': [], 'ce_loss': [], 'accuracy': []}
+    val_losses = {'iter': [], 'loss': [], 'mse_loss': [], 'ce_loss': [], 'accuracy': []}
 
     for epoch in range(epochs):
         print(f':: {epoch}-th epoch >>>')
 
+        pred_cnt = {'total':0, 'true':0}
+        val_pred_cnt = {'total':0, 'true':0}
         val_iter = iter(val_dataloader)
         model.train()
         for i, data in enumerate(iter(train_dataloader)):
@@ -69,6 +71,11 @@ def train(model, opt, device,
             target = target.to(device)
 
             y, (cl, _) = model(x)
+
+            pred = (torch.argmax(cl) == target).detach().numpy().sum()
+            pred_cnt['total'] = pred_cnt['total'] + x.size()[0]
+            pred_cnt['true'] = pred_cnt['true'] + pred
+
             mse_loss = mse_fn(y, x)
             ce_loss = ce_fn(cl, target)
 
@@ -78,11 +85,14 @@ def train(model, opt, device,
             opt.step()
 
             if (i+1) % display_step == 0 or (i+1) == len(train_dataloader):
-                print(f'>\t {i+1}-th iter:\tloss={loss:.2f},\tmse_loss={mse_loss:.3f},\tce_loss={ce_loss:.2f}')
+                accuracy = pred_cnt["true"]/pred_cnt["total"]
+                print(f'>\t {i+1}-th iter:\tloss={loss:.2f},\tmse_loss={mse_loss:.3f},\tce_loss={ce_loss:.2f}\taccuracy={accuracy:.2f}')
                 losses['iter'].append(epoch*len(train_dataloader)+i)
                 losses['loss'].append(loss)
                 losses['mse_loss'].append(mse_loss)
                 losses['ce_loss'].append(ce_loss)
+                losses['accuracy'].append(accuracy)
+                pred_cnt = {'total': 0, 'true': 0}
 
             del x, y, target
             del loss, mse_loss, ce_loss
@@ -99,16 +109,22 @@ def train(model, opt, device,
                 val_target = val_target.to(device)
                 with torch.no_grad():
                     val_y, (val_cl, _) = model(val_x)
+                    val_pred = (torch.argmax(val_cl) == val_target).detach().numpy().sum()
+                    val_pred_cnt['total'] = val_pred_cnt['total'] + val_x.size()[0]
+                    val_pred_cnt['true'] = val_pred_cnt['true'] + val_pred
                     val_mse_loss = mse_fn(val_y, val_x)
                     val_ce_loss = ce_fn(val_cl, val_target)
                     val_loss = val_mse_loss + val_ce_loss
 
                     if (i + 1) % display_step == 0 or (i + 1) == len(train_dataloader):
-                        print(f'>\t {i+1}-th iter:\t\t\t\t\t\tval_loss={val_loss:.2f},\tval_mse_loss={val_mse_loss:.3f},\tval_ce_loss={val_ce_loss:.2f}')
+                        val_accuracy = val_pred_cnt["true"]/val_pred_cnt["total"]
+                        print(f'>\t {i+1}-th iter:\t\t\t\t\t\tval_loss={val_loss:.2f},\tval_mse_loss={val_mse_loss:.3f},\tval_ce_loss={val_ce_loss:.2f}\tval_accuracy={val_accuracy:.2f}')
                         val_losses['iter'].append(epoch * len(train_dataloader) + i)
                         val_losses['loss'].append(val_loss)
                         val_losses['mse_loss'].append(val_mse_loss)
                         val_losses['ce_loss'].append(val_ce_loss)
+                        val_losses['accuracy'].append(val_accuracy)
+                        val_pred_cnt = {'total': 0, 'true': 0}
                     del val_loss, val_mse_loss, val_ce_loss
                 del val_x, val_y, val_target
                 model.train()
@@ -177,11 +193,13 @@ def test_MNIST():
     ax1.semilogy(x, result['losses']['loss'], 'ro-')
     ax1.semilogy(x, result['losses']['mse_loss'], 'bo-')
     ax1.semilogy(x, result['losses']['ce_loss'], 'go-')
+    ax2.plot(x, result['losses']['accuracy'], 'ko-')
 
     x = result['val_losses']['iter']
     ax1.semilogy(x, result['val_losses']['loss'], 'rx-.')
     ax1.semilogy(x, result['val_losses']['mse_loss'], 'bx-.')
     ax1.semilogy(x, result['val_losses']['ce_loss'], 'gx-.')
+    ax2.plot(x, result['val_losses']['accuracy'], 'k-.')
 
     ax1.legend(('loss', 'mse_loss', 'ce_loss', 'val_loss', 'val_mse_loss', 'val_ce_loss'))
     ax1.set_xlabel('iter')
