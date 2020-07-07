@@ -40,3 +40,43 @@ class Hypo(nn.Module):
     def extra_repr(self):
         inplace_str = ', inplace=True' if self.inplace else ''
         return 'min={}, max={}{}'.format(self.min, self.max, inplace_str)
+
+
+class DendricLinear(nn.Module):
+    def __init__(self, in_features, out_features,
+                 hypers=[], hypos=[], T=1.):
+        super(DendricLinear, self).__init__()
+        self.relus = {'hyper': hypers,
+                      'hypo': hypos,
+                      'standard': [in_features-sum(hypers+hypos)]}
+
+        self.hyper_relu = Hyper(offset=T/2)
+        self.hypo_relu = Hypo(max=T/2)
+        self.final_relu = nn.ReLU()
+
+        hyper_linears = []
+        for i in self.relus['hyper']:
+            hyper_linears.append(nn.Linear(in_features=i, out_features=out_features))
+        self.hyper_linears = nn.ModuleList(hyper_linears)
+        hypo_linears = []
+        for i in self.relus['hypo']:
+            hypo_linears.append(nn.Linear(in_features=i, out_features=out_features))
+        self.hypo_linears = nn.ModuleList(hypo_linears)
+        self.standard_linear = nn.Linear(in_features=self.relus['standard'][0], out_features=out_features)
+
+    def forward(self, input):
+        out = []
+        idx = 0
+        for i, linear in zip(self.relus['hyper'], self.hyper_linears):
+            out.append(self.hyper_relu(linear(input[:, idx:idx+i])))
+            idx = idx+i
+        for i, linear in zip(self.relus['hypo'], self.hypo_linears):
+            out.append(self.hypo_relu(linear(input[:, idx:idx+i])))
+            idx = idx+i
+        out.append(self.standard_linear(input[:, idx:]))
+
+        out = torch.stack(out, dim=2)
+        out = torch.sum(out, dim=2)
+        out = self.final_relu(out)
+
+        return out

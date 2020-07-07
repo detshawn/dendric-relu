@@ -1,5 +1,6 @@
 from torch import nn
 import torch
+from .activations import DendricLinear
 
 
 class Encoder(nn.Module):
@@ -8,7 +9,9 @@ class Encoder(nn.Module):
         layers = []
         for i in range(0, len(layer_config)-2):
             layer = nn.Sequential()
-            layer.add_module(f'l{i}', nn.Linear(in_features=layer_config[i], out_features=layer_config[i+1]))
+            hypers, hypos = [pow(2, 3-i)] * pow(2, 2-i), [pow(2, 3-i)] * pow(2, 2-i)
+            layer.add_module(f'l{i}', DendricLinear(in_features=layer_config[i], out_features=layer_config[i+1],
+                                                    hypers=hypers, hypos=hypos))
             layer.add_module(f'bn{i}', nn.BatchNorm1d(num_features=layer_config[i+1]))
             layers.append(layer)
         two_layers = [nn.Linear(in_features=layer_config[-2], out_features=layer_config[-1]),
@@ -54,7 +57,9 @@ class Decoder(nn.Module):
         layers = []
         for i in range(0, len(layer_config)-2):
             layer = nn.Sequential()
-            layer.add_module(f'l{i}', nn.Linear(in_features=layer_config[i], out_features=layer_config[i+1]))
+            hypers, hypos = [pow(2, i+1)] * pow(2, i), [pow(2, i+1)] * pow(2, i)
+            layer.add_module(f'l{i}', DendricLinear(in_features=layer_config[i], out_features=layer_config[i+1],
+                                                    hypers=hypers, hypos=hypos))
             layer.add_module(f'bn{i}', nn.BatchNorm1d(num_features=layer_config[i+1]))
             layers.append(layer)
         layers.append(nn.Linear(in_features=layer_config[-2], out_features=layer_config[-1]))
