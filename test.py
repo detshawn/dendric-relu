@@ -8,6 +8,7 @@ from mnist import MNIST
 from utils import to_categorical
 
 from model.shallownet import ShallowNet
+from argparse import ArgumentParser
 
 
 class MNISTDataset(Dataset):
@@ -45,13 +46,10 @@ def test_activation_functions():
 
 
 def train(model, opt, device,
-          train_dataloader, val_dataloader, val_set_ratio,
-          epochs):
+          train_dataloader, val_dataloader, eval_step,
+          epochs, display_step):
     mse_fn = torch.nn.MSELoss()
     ce_fn = torch.nn.CrossEntropyLoss()
-
-    display_step = 100
-    eval_step = int(1/val_set_ratio)
 
     losses = {'iter': [], 'loss': [], 'mse_loss': [], 'ce_loss': [], 'accuracy': []}
     val_losses = {'iter': [], 'loss': [], 'mse_loss': [], 'ce_loss': [], 'accuracy': []}
@@ -133,23 +131,54 @@ def train(model, opt, device,
             'val_losses': val_losses}
 
 
+def plot_result(result, tag=None):
+    fig, axes = plt.subplots(nrows=2, ncols=1, figsize=(15, 12))
+    ax1, ax2 = axes[0], axes[1]
+
+    x = result['losses']['iter']
+    ax1.semilogy(x, result['losses']['loss'], 'ro-')
+    ax1.semilogy(x, result['losses']['mse_loss'], 'bo-')
+    ax1.semilogy(x, result['losses']['ce_loss'], 'go-')
+    ax2.plot(x, [i*100 for i in result['losses']['accuracy']], 'ko-')
+
+    x = result['val_losses']['iter']
+    ax1.semilogy(x, result['val_losses']['loss'], 'rx-.')
+    ax1.semilogy(x, result['val_losses']['mse_loss'], 'bx-.')
+    ax1.semilogy(x, result['val_losses']['ce_loss'], 'gx-.')
+    ax2.plot(x, [i*100 for i in result['val_losses']['accuracy']], 'k-.')
+
+    ax1.legend(('loss', 'mse_loss', 'ce_loss', 'val_loss', 'val_mse_loss', 'val_ce_loss'))
+    ax1.set_xlabel('iter.')
+    ax1.set_ylabel('loss (in log scale)')
+    ax1.set_title('Loss vs iterations')
+    ax1.grid()
+
+    ax2.legend(('accuracy', 'val_accuracy'))
+    ax2.set_xlabel('iter.')
+    ax2.set_ylabel('acc. (%)')
+    ax2.set_title('Acc. vs iterations')
+    ax2.grid()
+
+    filename = './losses' + (f'_{tag}' if tag is not None else '') + '.png'
+    plt.savefig(filename)
+
+
 def test_MNIST():
     print('>>> MNIST test starts!')
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    batch_size = 8 if device is "cuda" else 4
+    batch_size = args.batch_size if device is "cuda" else 4
 
     print('importing data ...')
     mndata = MNIST('../mnist')
     train_images, train_labels = mndata.load_testing()
     # print(mndata.display(train_images[10]))
     train_dataset = MNISTDataset(np.array(train_images), np.array(train_labels))
-    print(f'len(train_dataset): {len(train_dataset)}')
+    # print(f'len(train_dataset): {len(train_dataset)}')
     l = len(train_dataset)
-    val_set_ratio = 0.1
     train_dataset, val_dataset = torch.utils.data.random_split(train_dataset,
-                                                               [l - int(l * val_set_ratio),
-                                                                int(l * val_set_ratio)])
+                                                               [l - int(l * args.val_set_ratio),
+                                                                int(l * args.val_set_ratio)])
     print(f'=> len(train_dataset), len(val_dataset): {len(train_dataset)}, {len(val_dataset)}')
 
     train_dl = DataLoader(dataset=train_dataset,
@@ -164,7 +193,7 @@ def test_MNIST():
     test_images, test_labels = mndata.load_testing()
     # print(mndata.display(test_images[10]))
     test_dataset = MNISTDataset(np.array(test_images), np.array(test_labels))
-    print(f'len(test_dataset): {len(test_dataset)}')
+    # print(f'len(test_dataset): {len(test_dataset)}')
     test_dl = DataLoader(dataset=test_dataset,
                          batch_size=batch_size,
                          shuffle=True)
@@ -184,35 +213,23 @@ def test_MNIST():
 
     result = train(model=model, opt=opt, device=device,
                    train_dataloader=train_dl,
-                   val_dataloader=val_dl, val_set_ratio=val_set_ratio,
-                   epochs=1)
+                   val_dataloader=val_dl, eval_step=int(1/args.val_set_ratio),
+                   epochs=args.epochs, display_step=args.display_step)
 
-    fig, ax1 = plt.subplots(figsize=(15, 8))
-    ax2 = ax1.twinx()
-    x = result['losses']['iter']
-    ax1.semilogy(x, result['losses']['loss'], 'ro-')
-    ax1.semilogy(x, result['losses']['mse_loss'], 'bo-')
-    ax1.semilogy(x, result['losses']['ce_loss'], 'go-')
-    ax2.plot(x, result['losses']['accuracy'], 'ko-')
-
-    x = result['val_losses']['iter']
-    ax1.semilogy(x, result['val_losses']['loss'], 'rx-.')
-    ax1.semilogy(x, result['val_losses']['mse_loss'], 'bx-.')
-    ax1.semilogy(x, result['val_losses']['ce_loss'], 'gx-.')
-    ax2.plot(x, result['val_losses']['accuracy'], 'k-.')
-
-    ax1.legend(('loss', 'mse_loss', 'ce_loss', 'val_loss', 'val_mse_loss', 'val_ce_loss'))
-    ax1.set_xlabel('iter')
-    plt.grid()
-
-    tag = 'bn'
-    plt.savefig(f'./losses_{tag}.png')
+    plot_result(result, tag=args.tag)
 
 
 def main():
-    test_activation_functions()
+    # test_activation_functions()
     test_MNIST()
 
 
 if __name__ == "__main__":
+    parser = ArgumentParser()
+    parser.add_argument('-batch-size', default=8, type=int)
+    parser.add_argument('-epochs', default=64, type=int)
+    parser.add_argument('-tag', default='sigmoid2')
+    parser.add_argument('-val-set-ratio', default=0.1, type=float)
+    parser.add_argument('-display-step', default=300, type=int)
+    args = parser.parse_args()
     main()
