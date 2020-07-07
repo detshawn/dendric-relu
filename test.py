@@ -5,7 +5,7 @@ from torch.utils.data import Dataset, DataLoader
 import matplotlib.pyplot as plt
 
 from mnist import MNIST
-from utils import to_categorical
+from utils import to_categorical, KLLoss
 
 from model.shallownet import ShallowNet
 from argparse import ArgumentParser
@@ -50,9 +50,10 @@ def train(model, opt, device,
           epochs, display_step):
     mse_fn = torch.nn.MSELoss()
     ce_fn = torch.nn.CrossEntropyLoss()
+    kl_fn = KLLoss
 
-    losses = {'iter': [], 'loss': [], 'mse_loss': [], 'ce_loss': [], 'accuracy': []}
-    val_losses = {'iter': [], 'loss': [], 'mse_loss': [], 'ce_loss': [], 'accuracy': []}
+    losses = {'iter': [], 'loss': [], 'mse_loss': [], 'ce_loss': [], 'kl_loss': [], 'accuracy': []}
+    val_losses = {'iter': [], 'loss': [], 'mse_loss': [], 'ce_loss': [], 'kl_loss': [], 'accuracy': []}
 
     for epoch in range(epochs):
         print(f':: {epoch}-th epoch >>>')
@@ -68,7 +69,7 @@ def train(model, opt, device,
             x = x.to(device)
             target = target.to(device)
 
-            y, (cl, _) = model(x)
+            y, (cl, z_sample, z_mean, z_log_var) = model(x)
 
             pred = (torch.argmax(cl) == target).detach().numpy().sum()
             pred_cnt['total'] = pred_cnt['total'] + x.size()[0]
@@ -76,24 +77,26 @@ def train(model, opt, device,
 
             mse_loss = mse_fn(y, x)
             ce_loss = ce_fn(cl, target)
+            kl_loss = kl_fn(z_mean, z_log_var)
 
-            loss = mse_loss + ce_loss
+            loss = mse_loss + ce_loss + kl_loss
 
             loss.backward()
             opt.step()
 
             if (i+1) % display_step == 0 or (i+1) == len(train_dataloader):
                 accuracy = pred_cnt["true"]/pred_cnt["total"]
-                print(f'>\t {i+1}-th iter:\tloss={loss:.2f},\tmse_loss={mse_loss:.3f},\tce_loss={ce_loss:.2f}\taccuracy={accuracy:.2f}')
+                print(f'>\t {i+1}-th iter:\tloss={loss:.2f},\tmse_loss={mse_loss:.3f},\tce_loss={ce_loss:.2f}\tkl_loss={kl_loss:.5f}\taccuracy={accuracy:.2f}')
                 losses['iter'].append(epoch*len(train_dataloader)+i)
                 losses['loss'].append(loss)
                 losses['mse_loss'].append(mse_loss)
                 losses['ce_loss'].append(ce_loss)
+                losses['kl_loss'].append(kl_loss)
                 losses['accuracy'].append(accuracy)
                 pred_cnt = {'total': 0, 'true': 0}
 
             del x, y, target
-            del loss, mse_loss, ce_loss
+            del loss, mse_loss, ce_loss, kl_loss
 
             if (i + 1) % eval_step == 0:
                 model.eval()
@@ -106,24 +109,26 @@ def train(model, opt, device,
                 val_x = val_x.to(device)
                 val_target = val_target.to(device)
                 with torch.no_grad():
-                    val_y, (val_cl, _) = model(val_x)
+                    val_y, (val_cl, val_z_sample, val_z_mean, val_z_log_var) = model(val_x)
                     val_pred = (torch.argmax(val_cl) == val_target).detach().numpy().sum()
                     val_pred_cnt['total'] = val_pred_cnt['total'] + val_x.size()[0]
                     val_pred_cnt['true'] = val_pred_cnt['true'] + val_pred
                     val_mse_loss = mse_fn(val_y, val_x)
                     val_ce_loss = ce_fn(val_cl, val_target)
-                    val_loss = val_mse_loss + val_ce_loss
+                    val_kl_loss = kl_fn(val_z_mean, val_z_log_var)
+                    val_loss = val_mse_loss + val_ce_loss + val_kl_loss
 
                     if (i + 1) % display_step == 0 or (i + 1) == len(train_dataloader):
                         val_accuracy = val_pred_cnt["true"]/val_pred_cnt["total"]
-                        print(f'>\t {i+1}-th iter:\t\t\t\t\t\tval_loss={val_loss:.2f},\tval_mse_loss={val_mse_loss:.3f},\tval_ce_loss={val_ce_loss:.2f}\tval_accuracy={val_accuracy:.2f}')
+                        print(f'>\t {i+1}-th iter:\t\t\t\t\t\tval_loss={val_loss:.2f},\tval_mse_loss={val_mse_loss:.3f},\tval_ce_loss={val_ce_loss:.2f}\tval_kl_loss={val_kl_loss:.5f}\tval_accuracy={val_accuracy:.2f}')
                         val_losses['iter'].append(epoch * len(train_dataloader) + i)
                         val_losses['loss'].append(val_loss)
                         val_losses['mse_loss'].append(val_mse_loss)
                         val_losses['ce_loss'].append(val_ce_loss)
+                        val_losses['kl_loss'].append(val_kl_loss)
                         val_losses['accuracy'].append(val_accuracy)
                         val_pred_cnt = {'total': 0, 'true': 0}
-                    del val_loss, val_mse_loss, val_ce_loss
+                    del val_loss, val_mse_loss, val_ce_loss, val_kl_loss
                 del val_x, val_y, val_target
                 model.train()
 
@@ -139,15 +144,18 @@ def plot_result(result, tag=None):
     ax1.semilogy(x, result['losses']['loss'], 'ro-')
     ax1.semilogy(x, result['losses']['mse_loss'], 'bo-')
     ax1.semilogy(x, result['losses']['ce_loss'], 'go-')
+    ax1.semilogy(x, result['losses']['kl_loss'], 'mo-')
     ax2.plot(x, [i*100 for i in result['losses']['accuracy']], 'ko-')
 
     x = result['val_losses']['iter']
     ax1.semilogy(x, result['val_losses']['loss'], 'rx-.')
     ax1.semilogy(x, result['val_losses']['mse_loss'], 'bx-.')
     ax1.semilogy(x, result['val_losses']['ce_loss'], 'gx-.')
+    ax1.semilogy(x, result['val_losses']['kl_loss'], 'mx-.')
     ax2.plot(x, [i*100 for i in result['val_losses']['accuracy']], 'k-.')
 
-    ax1.legend(('loss', 'mse_loss', 'ce_loss', 'val_loss', 'val_mse_loss', 'val_ce_loss'))
+    ax1.legend(('loss', 'mse_loss', 'ce_loss', 'kl_loss',
+                'val_loss', 'val_mse_loss', 'val_ce_loss', 'val_kl_loss'))
     ax1.set_xlabel('iter.')
     ax1.set_ylabel('loss (in log scale)')
     ax1.set_title('Loss vs iterations')
@@ -207,6 +215,7 @@ def test_MNIST():
                                      'decoder':[8, 64, 256, in_features]})
     model = model.to(device)
     print(model)
+    print(f'# parameters: {sum(p.numel() for p in model.parameters())}')
     opt = torch.optim.Adam(model.parameters(), 1e-3)
 
     print('training the model ...')

@@ -1,4 +1,12 @@
 import numpy as np
+import torch
+
+
+def KLLoss(z_mean, z_log_var):
+    # kl_loss = 1 + z_log_var - K.square(z_mean) - K.exp(z_log_var)
+    # kl_loss = K.sum(kl_loss, axis=-1)
+    # kl_loss = kl_loss * -0.5
+    return -5e-4 * torch.mean(torch.mean(1 + z_log_var - z_mean.pow(2) - torch.exp(z_log_var), dim=-1))
 
 
 def to_categorical(y, num_classes=None, dtype='float32'):
