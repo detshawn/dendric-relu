@@ -44,7 +44,7 @@ class Hypo(nn.Module):
 
 class DendricLinear(nn.Module):
     def __init__(self, in_features, out_features,
-                 hypers=[], hypos=[], T=1.):
+                 hypers=[], hypos=[], T=1., final_relu=True):
         super(DendricLinear, self).__init__()
         self.relus = {'hyper': hypers,
                       'hypo': hypos,
@@ -52,7 +52,7 @@ class DendricLinear(nn.Module):
 
         self.hyper_relu = Hyper(offset=T/2)
         self.hypo_relu = Hypo(max=T/2)
-        self.final_relu = nn.ReLU()
+        self.final_relu = nn.ReLU() if final_relu else None
 
         hyper_linears = []
         for i in self.relus['hyper']:
@@ -77,6 +77,7 @@ class DendricLinear(nn.Module):
 
         out = torch.stack(out, dim=2)
         out = torch.sum(out, dim=2)
-        out = self.final_relu(out)
+        if self.final_relu is not None:
+            out = self.final_relu(out)
 
         return out
