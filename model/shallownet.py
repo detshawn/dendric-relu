@@ -2,45 +2,54 @@ from torch import nn
 
 
 class LinearNN(nn.Module):
-    def __init__(self, layer_config):
+    def __init__(self, layer_config, dropout=True):
         super(LinearNN, self).__init__()
         layers = []
         for i in range(0, len(layer_config)-1):
             layer = nn.Sequential()
             layer.add_module(f'l{i}', nn.Linear(in_features=layer_config[i], out_features=layer_config[i+1]))
-            layer.add_module(f'bn{i}', nn.BatchNorm1d(num_features=layer_config[i+1]))
+            if i+2 != len(layer_config):
+                layer.add_module(f'bn{i}', nn.BatchNorm1d(num_features=layer_config[i+1]))
             layers.append(layer)
         self.layers = nn.ModuleList(layers)
-        self.do = nn.Dropout(p=0.2)
+        self.do = nn.Dropout(p=0.15) if dropout else None
         self.relu = nn.ReLU()
+        self.sigmoid = nn.Sigmoid()
 
     def forward(self, x):
         out = x
-        for l in self.layers:
+        for l in self.layers[:-1]:
             out = l(out)
-            out = self.do(out)
+            if self.do is not None:
+                out = self.do(out)
             out = self.relu(out)
+
+        out = self.layers[-1](out)
+        out = self.sigmoid(out)
+
         return out
 
 
 class Classifier(nn.Module):
-    def __init__(self, layer_config):
+    def __init__(self, layer_config, dropout=True):
         super(Classifier, self).__init__()
         layers = []
         for i in range(0, len(layer_config)-1):
             layer = nn.Sequential()
             layer.add_module(f'l{i}', nn.Linear(in_features=layer_config[i], out_features=layer_config[i+1]))
-            layer.add_module(f'bn{i}', nn.BatchNorm1d(num_features=layer_config[i+1]))
+            if i+2 != len(layer_config):
+                layer.add_module(f'bn{i}', nn.BatchNorm1d(num_features=layer_config[i+1]))
             layers.append(layer)
         self.layers = nn.ModuleList(layers)
-        self.do = nn.Dropout(p=0.2)
+        self.do = nn.Dropout(p=0.15) if dropout else None
         self.relu = nn.ReLU()
 
     def forward(self, x):
         out = x
         for l in self.layers[:-1]:
             out = l(out)
-            out = self.do(out)
+            if self.do is not None:
+                out = self.do(out)
             out = self.relu(out)
         out = self.layers[-1](out)
 
