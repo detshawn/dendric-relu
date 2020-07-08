@@ -5,7 +5,7 @@ from torch.utils.data import Dataset, DataLoader
 import matplotlib.pyplot as plt
 
 from mnist import MNIST
-from utils import to_categorical, KLLoss
+from utils import *
 
 from model.shallownet import ShallowNet
 from argparse import ArgumentParser
@@ -48,6 +48,7 @@ def test_activation_functions():
 def train(model, opt, device,
           train_dataloader, val_dataloader, eval_step,
           epochs, display_step):
+    logger = Logger()
     mse_fn = torch.nn.MSELoss()
     ce_fn = torch.nn.CrossEntropyLoss()
     kl_fn = KLLoss
@@ -58,8 +59,8 @@ def train(model, opt, device,
     for epoch in range(epochs):
         print(f':: {epoch}-th epoch >>>')
 
-        pred_cnt = {'total':0, 'true':0}
-        val_pred_cnt = {'total':0, 'true':0}
+        pred_cnt = {'total': 0, 'true': 0}
+        val_pred_cnt = {'total': 0, 'true': 0}
         val_iter = iter(val_dataloader)
         model.train()
         for i, data in enumerate(iter(train_dataloader)):
@@ -69,24 +70,36 @@ def train(model, opt, device,
             x = x.to(device)
             target = target.to(device)
 
+            # forward
             y, (cl, z_sample, z_mean, z_log_var) = model(x)
-
+            # predict classification
             pred = (torch.argmax(cl, dim=1) == target).detach().numpy().sum()
+
             pred_cnt['total'] = pred_cnt['total'] + x.size()[0]
             pred_cnt['true'] = pred_cnt['true'] + pred
 
+            # losses
             mse_loss = mse_fn(y, x)
             ce_loss = ce_fn(cl, target)
             kl_loss = kl_fn(z_mean, z_log_var)
 
             loss = mse_loss + ce_loss + kl_loss
+            meta = {
+                'loss': {'total': loss.clone().detach().cpu(), 'mse': mse_loss.clone().detach().cpu(),
+                          'ce': ce_loss.clone().detach().cpu(), 'kl': kl_loss.clone().detach().cpu()},
+                'acc': {'acc': pred_cnt["true"]/pred_cnt["total"]}
+            }
 
+            # backward
             loss.backward()
+            # update
             opt.step()
 
             if (i+1) % display_step == 0 or (i+1) == len(train_dataloader):
-                accuracy = pred_cnt["true"]/pred_cnt["total"]
+                accuracy = meta['acc']['acc']
                 print(f'>\t {i+1}-th iter:\tloss={loss:.2f},\tmse_loss={mse_loss:.3f},\tce_loss={ce_loss:.2f}\tkl_loss={kl_loss:.5f}\taccuracy={accuracy:.2f}')
+                logger.scalars_summary(f'{args.tag}/train', meta['loss'], epoch * len(train_dataloader) + i + 1)
+                logger.scalars_summary(f'{args.tag}/train_acc', meta['acc'], epoch * len(train_dataloader) + i + 1)
                 losses['iter'].append(epoch*len(train_dataloader)+i)
                 losses['loss'].append(loss)
                 losses['mse_loss'].append(mse_loss)
@@ -117,10 +130,17 @@ def train(model, opt, device,
                     val_ce_loss = ce_fn(val_cl, val_target)
                     val_kl_loss = kl_fn(val_z_mean, val_z_log_var)
                     val_loss = val_mse_loss + val_ce_loss + val_kl_loss
+                    val_meta = {
+                        'loss': {'val_total': val_loss.clone().detach().cpu().numpy(), 'val_mse': val_mse_loss.clone().detach().cpu().numpy(),
+                                 'val_ce': val_ce_loss.clone().detach().cpu().numpy(), 'val_kl': val_kl_loss.clone().detach().cpu().numpy()},
+                        'acc': {'val_acc': val_pred_cnt["true"] / val_pred_cnt["total"]}
+                    }
 
                     if (i + 1) % display_step == 0 or (i + 1) == len(train_dataloader):
-                        val_accuracy = val_pred_cnt["true"]/val_pred_cnt["total"]
+                        val_accuracy = val_meta['acc']['val_acc']
                         print(f'>\t {i+1}-th iter:\t\t\t\t\t\tval_loss={val_loss:.2f},\tval_mse_loss={val_mse_loss:.3f},\tval_ce_loss={val_ce_loss:.2f}\tval_kl_loss={val_kl_loss:.5f}\tval_accuracy={val_accuracy:.2f}')
+                        logger.scalars_summary(f'{args.tag}/train', val_meta['loss'], epoch * len(train_dataloader) + i + 1)
+                        logger.scalars_summary(f'{args.tag}/train_acc', val_meta['acc'], epoch * len(train_dataloader) + i + 1)
                         val_losses['iter'].append(epoch * len(train_dataloader) + i)
                         val_losses['loss'].append(val_loss)
                         val_losses['mse_loss'].append(val_mse_loss)
