@@ -4,7 +4,7 @@ from .activations import DendricLinear
 
 
 class Encoder(nn.Module):
-    def __init__(self, layer_config, dropout=True):
+    def __init__(self, layer_config, dropout=True, multi_position=1):
         super(Encoder, self).__init__()
         layers = []
         for i in range(0, len(layer_config)-2):
@@ -12,7 +12,7 @@ class Encoder(nn.Module):
             if i != 0:
                 hypers, hypos = [pow(2, 3-i)] * pow(2, 4-i), [pow(2, 3-i)] * pow(2, 4-i)
                 layer.add_module(f'dl{i}', DendricLinear(in_features=layer_config[i], out_features=layer_config[i+1],
-                                                        hypers=hypers, hypos=hypos))
+                                                        hypers=hypers, hypos=hypos, multi_position=multi_position))
             else:
                 layer.add_module(f'l{i}', nn.Linear(in_features=layer_config[i], out_features=layer_config[i+1]))
             layer.add_module(f'bn{i}', nn.BatchNorm1d(num_features=layer_config[i+1]))
@@ -55,7 +55,7 @@ class Encoder(nn.Module):
 
 
 class Decoder(nn.Module):
-    def __init__(self, layer_config, dropout=True):
+    def __init__(self, layer_config, dropout=True, multi_position=1):
         super(Decoder, self).__init__()
         layers = []
         for i in range(0, len(layer_config)-2):
@@ -63,7 +63,7 @@ class Decoder(nn.Module):
             if i != 0:
                 hypers, hypos = [pow(2, i)] * pow(2, i+1), [pow(2, i)] * pow(2, i+1)
                 layer.add_module(f'dl{i}', DendricLinear(in_features=layer_config[i], out_features=layer_config[i+1],
-                                                        hypers=hypers, hypos=hypos))
+                                                        hypers=hypers, hypos=hypos, multi_position=multi_position))
             else:
                 layer.add_module(f'l{i}', nn.Linear(in_features=layer_config[i], out_features=layer_config[i+1]))
             layer.add_module(f'bn{i}', nn.BatchNorm1d(num_features=layer_config[i+1]))
@@ -89,15 +89,17 @@ class Decoder(nn.Module):
 
 
 class Classifier(nn.Module):
-    def __init__(self, layer_config, dropout=True):
+    def __init__(self, layer_config, dropout=True, multi_position=1):
         super(Classifier, self).__init__()
         layers = []
-        for i in range(0, len(layer_config)-1):
+        for i in range(0, len(layer_config)-2):
             layer = nn.Sequential()
-            layer.add_module(f'l{i}', nn.Linear(in_features=layer_config[i], out_features=layer_config[i+1]))
-            if i+2 != len(layer_config):
-                layer.add_module(f'bn{i}', nn.BatchNorm1d(num_features=layer_config[i+1]))
+            layer.add_module(f'l{i}', nn.Linear(in_features=layer_config[i], out_features=layer_config[i + 1]))
             layers.append(layer)
+        layer = nn.Sequential()
+        layer.add_module(f'dl{i}', DendricLinear(in_features=layer_config[-2], out_features=layer_config[-1],
+                                                 hypers=[2], hypos=[2], multi_position=multi_position, final_relu=False))
+        layers.append(layer)
         self.layers = nn.ModuleList(layers)
         self.do = nn.Dropout(p=0.15) if dropout else None
         self.relu = nn.ReLU()
@@ -115,7 +117,7 @@ class Classifier(nn.Module):
 
 
 class ShallowNet(nn.Module):
-    def __init__(self, in_features, out_features, n_hiddens=2, layer_config=None):
+    def __init__(self, in_features, out_features, n_hiddens=2, layer_config=None, multi_position=1):
         super(ShallowNet, self).__init__()
         self.layer_config = layer_config
         if layer_config is None:
@@ -130,9 +132,9 @@ class ShallowNet(nn.Module):
             self.layer_config['classifier'] = [out_features, 8, 10]
             self.layer_config['decoder'] = encoder_config[-1::-1]
 
-        self.encoder = Encoder(self.layer_config['encoder'])
-        self.classifier = Classifier(self.layer_config['classifier'])
-        self.decoder = Decoder(self.layer_config['decoder'])
+        self.encoder = Encoder(self.layer_config['encoder'], multi_position=multi_position)
+        self.classifier = Classifier(self.layer_config['classifier'], multi_position=multi_position)
+        self.decoder = Decoder(self.layer_config['decoder'], multi_position=multi_position)
 
     def forward(self, x):
         out = x
