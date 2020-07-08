@@ -1,5 +1,6 @@
 import numpy as np
 import torch
+from tensorboardX import SummaryWriter
 
 
 def KLLoss(z_mean, z_log_var):
@@ -56,3 +57,32 @@ def to_categorical(y, num_classes=None, dtype='float32'):
     output_shape = input_shape + (num_classes,)
     categorical = np.reshape(categorical, output_shape)
     return categorical
+
+
+class Logger(object):
+    def __init__(self, logdir='./log'):
+        self.writer = SummaryWriter(logdir)
+
+    def scalar_summary(self, tag, value, step):
+        self.writer.add_scalar(tag, value, step)
+        self.writer.flush()
+
+    def scalars_summary(self, tag, dictionary, step):
+        self.writer.add_scalars(tag, dictionary, step)
+        self.writer.flush()
+
+    def text_summary(self, tag, value, step):
+        self.writer.add_text(tag, value, step)
+        self.writer.flush()
+
+    def graph_summary(self, model, input_to_model):
+        self.writer.add_graph(model, input_to_model=input_to_model, profile_with_cuda=torch.cuda.is_available())
+        self.writer.flush()
+
+    def audio_summary(self, tag, value, step, sr):
+        self.writer.add_audio(tag, value, step, sample_rate=sr)
+        self.writer.flush()
+
+    def image_summary(self, tag, value, step, dataformats='CHW'):
+        self.writer.add_image(tag, value, step, dataformats=dataformats)
+        self.writer.flush()
