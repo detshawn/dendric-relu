@@ -233,6 +233,7 @@ def test_MNIST():
                        layer_config={'encoder':[in_features, 256, 64, 8],
                                      'classifier':[8, 8, 10],
                                      'decoder':[8, 64, 256, in_features]},
+                       dendric=args.dendric,
                        multi_position=args.multi_position)
     model = model.to(device)
     print(model)
@@ -259,6 +260,7 @@ if __name__ == "__main__":
     parser.add_argument('-batch-size', default=8, type=int)
     parser.add_argument('-epochs', default=64, type=int)
     parser.add_argument('-tag', default='nonetag')
+    parser.add_argument('--dendric', action='store_true')
     parser.add_argument('-val-set-ratio', default=0.1, type=float)
     parser.add_argument('-display-step', default=300, type=int)
     parser.add_argument('-multi-position', default=1, type=int)
