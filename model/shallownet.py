@@ -117,10 +117,7 @@ class Classifier(nn.Module):
             out = l(out)
             if self.do is not None:
                 out = self.do(out)
-            print(f'out[0, :]: {out[0, :]}')
             out = self.relu(out)
-            print(f'relued_out[0, :]: {out[0, :]}')
-            exit(0)
         out = self.layers[-1](out)
 
         return out
