@@ -22,7 +22,7 @@ class Encoder(nn.Module):
                       nn.Linear(in_features=layer_config[-2], out_features=layer_config[-1])]
         layers.append(nn.ModuleList(two_layers))
         self.layers = nn.ModuleList(layers)
-        self.do = nn.Dropout(p=0.15) if dropout else None
+        self.do = nn.Dropout(p=0.8) if dropout else None
         self.relu = nn.ReLU()
 
     @staticmethod
@@ -72,7 +72,7 @@ class Decoder(nn.Module):
             layers.append(layer)
         layers.append(nn.Linear(in_features=layer_config[-2], out_features=layer_config[-1]))
         self.layers = nn.ModuleList(layers)
-        self.do = nn.Dropout(p=0.15) if dropout else None
+        self.do = nn.Dropout(p=0.8) if dropout else None
         self.relu = nn.ReLU()
         self.sigmoid = nn.Sigmoid()
 
@@ -108,7 +108,7 @@ class Classifier(nn.Module):
             layer.add_module(f'l{len(layer_config)-1}', nn.Linear(in_features=layer_config[-2], out_features=layer_config[-1]))
         layers.append(layer)
         self.layers = nn.ModuleList(layers)
-        self.do = nn.Dropout(p=0.15) if dropout else None
+        self.do = nn.Dropout(p=0.8) if dropout else None
         self.relu = nn.ReLU()
 
     def forward(self, x):
