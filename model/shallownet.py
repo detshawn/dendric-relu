@@ -124,24 +124,24 @@ class Classifier(nn.Module):
 
 
 class ShallowNet(nn.Module):
-    def __init__(self, in_features, out_features, n_hiddens=2, layer_config=None, dendric=False, multi_position=1):
+    def __init__(self, in_features, out_features, n_hiddens=2, config=None, dendric=False, multi_position=1):
         super(ShallowNet, self).__init__()
-        self.layer_config = layer_config
-        if layer_config is None:
-            self.layer_config = {}
+        self.config = config
+        if config is None:
+            self.config = {'Encoder':{}, 'Decoder':{}, 'Classifier':{}}
             encoder_config = [in_features]
             step = int((in_features-out_features)/(n_hiddens+1))
             for i in range(n_hiddens):
                 encoder_config.append(out_features+step*i)
             encoder_config.append(out_features)
 
-            self.layer_config['encoder'] = encoder_config
-            self.layer_config['classifier'] = [out_features, 8, 10]
-            self.layer_config['decoder'] = encoder_config[-1::-1]
+            self.layer_config['Encoder']['layers'] = encoder_config
+            self.layer_config['Classifier']['layers'] = [out_features, 8, 10]
+            self.layer_config['Decoder']['layers'] = encoder_config[-1::-1]
 
-        self.encoder = Encoder(self.layer_config['encoder'], dendric=dendric, multi_position=multi_position)
-        self.classifier = Classifier(self.layer_config['classifier'], dendric=dendric, multi_position=multi_position)
-        self.decoder = Decoder(self.layer_config['decoder'], dendric=dendric, multi_position=multi_position)
+        self.encoder = Encoder(self.config['Encoder']['layers'], dendric=dendric, multi_position=multi_position)
+        self.classifier = Classifier(self.config['Classifier']['layers'], dendric=dendric, multi_position=multi_position)
+        self.decoder = Decoder(self.config['Decoder']['layers'], dendric=dendric, multi_position=multi_position)
 
     def forward(self, x):
         out = x

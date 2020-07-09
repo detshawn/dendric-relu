@@ -1,6 +1,4 @@
 from model.activations import Hyper, Hypo
-import torch
-import numpy as np
 from torch.utils.data import Dataset, DataLoader
 import matplotlib.pyplot as plt
 
@@ -9,6 +7,7 @@ from utils import *
 
 from model.shallownet import ShallowNet
 from argparse import ArgumentParser
+import yaml
 
 
 class MNISTDataset(Dataset):
@@ -228,11 +227,16 @@ def test_MNIST():
     print(f'len(test_dl): {len(test_dl)}')
 
     print('constructing a model ...')
+    # load config file
+    # with open(args.config) as f:
+    #     hp_str = ''.join(f.readlines())
+    with open(args.config) as f:
+        config = yaml.load(f)
+    # print(f'config: {config}')
+
     in_features = train_dataset[0][0].shape[0]
     model = ShallowNet(in_features=in_features, out_features=8,
-                       layer_config={'encoder':[in_features, 256, 64, 8],
-                                     'classifier':[8, 8, 10],
-                                     'decoder':[8, 64, 256, in_features]},
+                       config=config['ShallowNet'],
                        dendric=args.dendric,
                        multi_position=args.multi_position)
     model = model.to(device)
@@ -257,6 +261,7 @@ def main():
 
 if __name__ == "__main__":
     parser = ArgumentParser()
+    parser.add_argument('-config', required=True)
     parser.add_argument('-batch-size', default=8, type=int)
     parser.add_argument('-epochs', default=64, type=int)
     parser.add_argument('-tag', default='nonetag')
