@@ -51,45 +51,72 @@ def train(model, opt, device,
     mse_fn = torch.nn.MSELoss()
     ce_fn = torch.nn.CrossEntropyLoss()
     kl_fn = KLLoss
+    guess_bce_fn = torch.nn.BCELoss()
 
-    losses = {'iter': [], 'loss': [], 'mse_loss': [], 'ce_loss': [], 'kl_loss': [], 'accuracy': []}
-    val_losses = {'iter': [], 'loss': [], 'mse_loss': [], 'ce_loss': [], 'kl_loss': [], 'accuracy': []}
+    losses = {'iter': [],
+              'loss': [], 'mse_loss': [], 'ce_loss': [], 'kl_loss': [],
+              'guess_bce_loss': [],
+              'accuracy': []}
+    val_losses = {'iter': [],
+                  'loss': [], 'mse_loss': [], 'ce_loss': [], 'kl_loss': [],
+                  'guess_bce_loss': [],
+                  'accuracy': []}
+
+    log_step = 4
 
     for epoch in range(epochs):
         print(f':: {epoch}-th epoch >>>')
 
-        pred_cnt = {'total': 0, 'true': 0}
-        val_pred_cnt = {'total': 0, 'true': 0}
+        pred_cnt = {'total': 0, 'true': 0, 'guess_true_pos': 0, 'guess_true_neg': 0}
+        val_pred_cnt = {'total': 0, 'true': 0, 'guess_true_pos': 0, 'guess_true_neg': 0}
         val_iter = iter(val_dataloader)
         distr = {'z_means': [], 'y_labels': [], 'i_successes': []}
+
         model.train()
         for i, data in enumerate(iter(train_dataloader)):
             opt.zero_grad()
+            meta = {'loss': {}, 'acc': {}}
 
             x, target = data
             x = x.to(device)
             target = target.to(device)
 
             # forward
-            y, (cl, z_sample, z_mean, z_log_var) = model(x)
+            y, (cl, z_sample, z_mean, z_log_var, guess_out) = model(x)
             # predict classification
-            pred = (torch.argmax(cl, dim=1) == target).detach().cpu().numpy()
-            pred_sum = pred.sum()
-
-            pred_cnt['total'] = pred_cnt['total'] + x.size()[0]
-            pred_cnt['true'] = pred_cnt['true'] + pred_sum
+            pred = (torch.argmax(cl, dim=1) == target).detach()
+            guess_pred = ((guess_out>=.5) == pred).detach()
 
             # losses
             mse_loss = mse_fn(y, x)
             ce_loss = ce_fn(cl, target)
             kl_loss = kl_fn(z_mean, z_log_var)
-
             loss = mse_loss + ce_loss + kl_loss
-            meta = {
-                'loss': {'total': loss.clone().detach().cpu(), 'mse': mse_loss.clone().detach().cpu(),
-                          'ce': ce_loss.clone().detach().cpu(), 'kl': kl_loss.clone().detach().cpu()},
-                'acc': {'acc': pred_cnt["true"]/pred_cnt["total"]}
-            }
+
+            meta['loss']['mse'] = mse_loss.clone().detach().cpu()
+            meta['loss']['ce'] = ce_loss.clone().detach().cpu()
+            meta['loss']['kl'] = kl_loss.clone().detach().cpu()
+            meta['loss']['total'] = loss.clone().detach().cpu()
+
+            if (epoch+1) > args.guess_trigger_epoch:
+                guess_bce_loss = guess_bce_fn(guess_out.double(), pred.double())
+                guess_pred = ((guess_out >= .5) == pred.view(-1, 1)).detach()
+                meta['loss']['guess_bce'] = guess_bce_loss.clone().detach().cpu()
+
+                loss = loss + guess_bce_loss
+                meta['loss']['total'] = meta['loss']['total'] + meta['loss']['guess_bce']
+
+            # predict classification
+            pred = pred.cpu().numpy()
+            pred_sum = pred.sum()
+
+            pred_cnt['total'] = pred_cnt['total'] + x.size()[0]
+            pred_cnt['true'] = pred_cnt['true'] + pred_sum
+            if (epoch+1) > args.guess_trigger_epoch:
+                guess_pred = guess_pred.cpu().numpy()
+                pred_cnt['guess_true_pos'] = pred_cnt['guess_true_pos'] + guess_pred[pred == 1].sum()
+                pred_cnt['guess_true_neg'] = pred_cnt['guess_true_neg'] + (guess_pred[pred == 0] == 0).sum()
+
             distr['z_means'].append(z_mean.clone().detach().cpu().numpy())
             distr['y_labels'].append(target.clone().detach().cpu().numpy())
             distr['i_successes'].append(pred)
@@ -100,8 +127,18 @@ def train(model, opt, device,
             opt.step()
 
             if (i+1) % display_step == 0 or (i+1) == len(train_dataloader):
+                meta['acc']['acc'] = pred_cnt["true"] / pred_cnt["total"]
                 accuracy = meta['acc']['acc']
-                print(f'>\t {i+1}-th iter:\tloss={loss:.2f},\tmse_loss={mse_loss:.3f},\tce_loss={ce_loss:.2f}\tkl_loss={kl_loss:.5f}\taccuracy={accuracy:.2f}')
+                loss_print = f'>\t {i+1}-th iter:\tloss={loss:.2f},\tmse_loss={mse_loss:.3f},\tce_loss={ce_loss:.2f}\tkl_loss={kl_loss:.5f}'
+                acc_print = f' \t               \taccuracy={accuracy:.2f}'
+                if (epoch + 1) > args.guess_trigger_epoch:
+                    loss_print += f'\tguess_bce_loss={guess_bce_loss:.5f}'
+                    meta['acc']['guess_acc'] = (pred_cnt["guess_true_pos"]+pred_cnt["guess_true_neg"]) / pred_cnt["total"]
+                    guess_acc = meta['acc']['guess_acc']
+                    acc_print += f' \t               \tguess_acc={guess_acc:.2f}'
+                print(loss_print)
+                print(acc_print)
+
                 logger.scalars_summary(f'{args.tag}/train', meta['loss'], epoch * len(train_dataloader) + i + 1)
                 logger.scalars_summary(f'{args.tag}/train_acc', meta['acc'], epoch * len(train_dataloader) + i + 1)
                 losses['iter'].append(epoch*len(train_dataloader)+i)
@@ -110,9 +147,9 @@ def train(model, opt, device,
                 losses['ce_loss'].append(ce_loss)
                 losses['kl_loss'].append(kl_loss)
                 losses['accuracy'].append(accuracy)
-                pred_cnt = {'total': 0, 'true': 0}
+                pred_cnt = {'total': 0, 'true': 0, 'guess_true_pos': 0, 'guess_true_neg': 0}
 
-                if epoch % 20 == 0:
+                if (epoch+1) % log_step == 0 and (i+1) == display_step:
                     distr['z_means'] = np.concatenate(distr['z_means'], axis=0)
                     distr['y_labels'] = np.concatenate(distr['y_labels'], axis=0)
                     distr['i_successes'] = np.concatenate(distr['i_successes'], axis=0)
@@ -120,6 +157,8 @@ def train(model, opt, device,
                     fig = plot_results((distr['z_means'], distr['y_labels'], distr['i_successes']), tag=args.tag)
                     img = fig2rgb_array(fig, expand=False)
                     logger.image_summary(f'{args.tag}/train', img, epoch * len(train_dataloader) + i + 1, dataformats='HWC')
+
+                    log_step = log_step * 2
                 distr = {'z_means': [], 'y_labels': [], 'i_successes': []}
 
             del x, y, target
@@ -127,6 +166,8 @@ def train(model, opt, device,
 
             if (i + 1) % eval_step == 0:
                 model.eval()
+                val_meta = {'loss': {}, 'acc': {}}
+
                 try:
                     val_data = next(val_iter)
                 except StopIteration:
@@ -136,23 +177,49 @@ def train(model, opt, device,
                 val_x = val_x.to(device)
                 val_target = val_target.to(device)
                 with torch.no_grad():
-                    val_y, (val_cl, val_z_sample, val_z_mean, val_z_log_var) = model(val_x)
-                    val_pred = (torch.argmax(val_cl, dim=1) == val_target).detach().cpu().numpy().sum()
-                    val_pred_cnt['total'] = val_pred_cnt['total'] + val_x.size()[0]
-                    val_pred_cnt['true'] = val_pred_cnt['true'] + val_pred
+                    val_y, (val_cl, val_z_sample, val_z_mean, val_z_log_var, val_guess_out) = model(val_x)
+                    val_pred = (torch.argmax(val_cl, dim=1) == val_target).detach()
+                    val_guess_pred = ((val_guess_out >= .5) == val_pred.view(-1, 1)).detach()
+
                     val_mse_loss = mse_fn(val_y, val_x)
                     val_ce_loss = ce_fn(val_cl, val_target)
                     val_kl_loss = kl_fn(val_z_mean, val_z_log_var)
                     val_loss = val_mse_loss + val_ce_loss + val_kl_loss
-                    val_meta = {
-                        'loss': {'val_total': val_loss.clone().detach().cpu().numpy(), 'val_mse': val_mse_loss.clone().detach().cpu().numpy(),
-                                 'val_ce': val_ce_loss.clone().detach().cpu().numpy(), 'val_kl': val_kl_loss.clone().detach().cpu().numpy()},
-                        'acc': {'val_acc': val_pred_cnt["true"] / val_pred_cnt["total"]}
-                    }
+
+                    val_meta['loss']['val_mse'] = val_mse_loss.clone().detach().cpu()
+                    val_meta['loss']['val_ce'] = val_ce_loss.clone().detach().cpu()
+                    val_meta['loss']['val_kl'] = val_kl_loss.clone().detach().cpu()
+                    val_meta['loss']['val_total'] = val_loss.clone().detach().cpu()
+
+                    if (epoch + 1) > args.guess_trigger_epoch:
+                        val_guess_bce_loss = guess_bce_fn(val_guess_out.double(), val_pred.double())
+                        val_meta['loss']['val_guess_bce'] = val_guess_bce_loss.clone().detach().cpu()
+
+                        val_loss = val_loss + val_guess_bce_loss
+                        val_meta['loss']['val_total'] = val_meta['loss']['val_total'] + val_meta['loss']['val_guess_bce']
+
+                    val_pred = val_pred.cpu().numpy()
+                    val_pred_sum = val_pred.sum()
+                    val_pred_cnt['total'] = val_pred_cnt['total'] + val_x.size()[0]
+                    val_pred_cnt['true'] = val_pred_cnt['true'] + val_pred_sum
+                    if (epoch + 1) > args.guess_trigger_epoch:
+                        val_guess_pred = val_guess_pred.cpu().numpy()
+                        val_pred_cnt['guess_true_pos'] = val_pred_cnt['guess_true_pos'] + val_guess_pred[val_pred == 1].sum()
+                        val_pred_cnt['guess_true_neg'] = val_pred_cnt['guess_true_neg'] + (val_guess_pred[val_pred == 0] == 0).sum()
 
                     if (i + 1) % display_step == 0 or (i + 1) == len(train_dataloader):
+                        val_meta['acc']['val_acc'] = val_pred_cnt["true"] / val_pred_cnt["total"]
                         val_accuracy = val_meta['acc']['val_acc']
-                        print(f'>\t {i+1}-th iter:\t\t\t\t\t\tval_loss={val_loss:.2f},\tval_mse_loss={val_mse_loss:.3f},\tval_ce_loss={val_ce_loss:.2f}\tval_kl_loss={val_kl_loss:.5f}\tval_accuracy={val_accuracy:.2f}')
+                        val_loss_print = f'>\t {i+1}-th iter:\t\t\t\t\t\tval_loss={val_loss:.2f},\tval_mse_loss={val_mse_loss:.3f},\tval_ce_loss={val_ce_loss:.2f}\tval_kl_loss={val_kl_loss:.5f}'
+                        val_acc_print = f' \t               \t\t\t\t\t\tval_accuracy={val_accuracy:.2f}'
+                        if (epoch + 1) > args.guess_trigger_epoch:
+                            val_loss_print += f'\tval_guess_bce_loss={val_guess_bce_loss:.5f}'
+                            val_meta['acc']['val_guess_acc'] = (val_pred_cnt["guess_true_pos"] + val_pred_cnt["guess_true_neg"]) / val_pred_cnt["total"]
+                            val_guess_acc = val_meta['acc']['val_guess_acc']
+                            val_acc_print += f' \t               \t\t\t\t\t\tval_guess_acc={val_guess_acc:.2f}'
+                        print(val_loss_print)
+                        print(val_acc_print)
+
                         logger.scalars_summary(f'{args.tag}/train', val_meta['loss'], epoch * len(train_dataloader) + i + 1)
                         logger.scalars_summary(f'{args.tag}/train_acc', val_meta['acc'], epoch * len(train_dataloader) + i + 1)
                         val_losses['iter'].append(epoch * len(train_dataloader) + i)
@@ -161,7 +228,7 @@ def train(model, opt, device,
                         val_losses['ce_loss'].append(val_ce_loss)
                         val_losses['kl_loss'].append(val_kl_loss)
                         val_losses['accuracy'].append(val_accuracy)
-                        val_pred_cnt = {'total': 0, 'true': 0}
+                        val_pred_cnt = {'total': 0, 'true': 0, 'guess_true_pos': 0, 'guess_true_neg': 0}
                     del val_loss, val_mse_loss, val_ce_loss, val_kl_loss
                 del val_x, val_y, val_target
                 model.train()
@@ -266,7 +333,7 @@ def test_MNIST():
                    val_dataloader=val_dl, eval_step=int(1/args.val_set_ratio),
                    epochs=args.epochs, display_step=args.display_step)
 
-    plot_result(result, tag=args.tag)
+    # plot_result(result, tag=args.tag)
 
 
 def main():
@@ -279,6 +346,7 @@ if __name__ == "__main__":
     parser.add_argument('-config', required=True)
     parser.add_argument('-batch-size', default=8, type=int)
     parser.add_argument('-epochs', default=64, type=int)
+    parser.add_argument('-guess-trigger-epoch', default=10, type=int)
     parser.add_argument('-tag', default='nonetag')
     parser.add_argument('--dendric', action='store_true')
     parser.add_argument('-val-set-ratio', default=0.1, type=float)

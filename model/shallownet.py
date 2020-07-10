@@ -4,8 +4,11 @@ from .activations import DendricLinear
 
 
 class Encoder(nn.Module):
-    def __init__(self, layer_config, dropout=True, dendric=False, multi_position=1):
+    def __init__(self, config, dropout=True, dendric=False, multi_position=1):
         super(Encoder, self).__init__()
+        layer_config = config['layers']
+        guess_net_config = config['guess_net']
+
         layers = []
         self.dendric = dendric
         for i in range(0, len(layer_config)-2):
@@ -22,8 +25,27 @@ class Encoder(nn.Module):
                       nn.Linear(in_features=layer_config[-2], out_features=layer_config[-1])]
         layers.append(nn.ModuleList(two_layers))
         self.layers = nn.ModuleList(layers)
+
+        guess_nets = []
+        guess_concat_length = 0
+        self.guess_nets_flag = {}
+        for i in range(len(guess_net_config)):
+            if len(guess_net_config[i]) > 0:
+                guess_net = nn.Sequential()
+                in_features = layer_config[i]
+                for j, guess_l in enumerate(guess_net_config[i]):
+                    guess_net.add_module(f'guess_l{j}', nn.Linear(in_features=in_features, out_features=guess_l))
+                    guess_net.add_module(f'bn{j}', nn.BatchNorm1d(num_features=guess_l))
+                    in_features = guess_l
+                guess_nets.append(guess_net)
+                self.guess_nets_flag[f'{i}'] = guess_net
+                guess_concat_length += in_features
+        self.guess_nets = nn.ModuleList(guess_nets)
+        self.guesser = nn.Linear(in_features=guess_concat_length, out_features=1)
+
         self.do = nn.Dropout(p=0.15) if dropout else None
         self.relu = nn.ReLU()
+        self.sigmoid = nn.Sigmoid()
 
     @staticmethod
     def _sampling(z_mean, z_log_var):
@@ -41,23 +63,33 @@ class Encoder(nn.Module):
 
     def forward(self, x):
         out = x
-        for l in self.layers[:-1]:
+        guess_in = []
+        for i, l in enumerate(self.layers[:-1]):
             out = l(out)
             if self.do is not None:
                 out = self.do(out)
             out = self.relu(out)
+
+            if f'{i+1}' in self.guess_nets_flag:
+                guess_in.append(self.guess_nets_flag[f'{i+1}'](out.clone().detach()))
+
+        guess_out = torch.cat(guess_in, dim=1)
+        guess_out = self.guesser(guess_out)
+        guess_out = self.sigmoid(guess_out)
 
         z_mean= self.layers[-1][0](out)
         z_log_var = self.layers[-1][1](out)
 
         z = self._sampling(z_mean, z_log_var)
 
-        return z, (z_mean, z_log_var)
+        return z, (z_mean, z_log_var, guess_out)
 
 
 class Decoder(nn.Module):
-    def __init__(self, layer_config, dropout=True, dendric=False, multi_position=1):
+    def __init__(self, config, dropout=True, dendric=False, multi_position=1):
         super(Decoder, self).__init__()
+        layer_config = config['layers']
+
         layers = []
         self.dendric = dendric
         for i in range(0, len(layer_config)-2):
@@ -91,8 +123,10 @@ class Decoder(nn.Module):
 
 
 class Classifier(nn.Module):
-    def __init__(self, layer_config, dropout=True, dendric=False, multi_position=1):
+    def __init__(self, config, dropout=True, dendric=False, multi_position=1):
         super(Classifier, self).__init__()
+        layer_config = config['layers']
+
         layers = []
         self.dendric = dendric
         for i in range(0, len(layer_config)-2):
@@ -139,13 +173,13 @@ class ShallowNet(nn.Module):
             self.layer_config['Classifier']['layers'] = [out_features, 8, 10]
             self.layer_config['Decoder']['layers'] = encoder_config[-1::-1]
 
-        self.encoder = Encoder(self.config['Encoder']['layers'], dendric=dendric, multi_position=multi_position)
-        self.classifier = Classifier(self.config['Classifier']['layers'], dendric=dendric, multi_position=multi_position)
-        self.decoder = Decoder(self.config['Decoder']['layers'], dendric=dendric, multi_position=multi_position)
+        self.encoder = Encoder(self.config['Encoder'], dendric=dendric, multi_position=multi_position)
+        self.classifier = Classifier(self.config['Classifier'], dendric=dendric, multi_position=multi_position)
+        self.decoder = Decoder(self.config['Decoder'], dendric=dendric, multi_position=multi_position)
 
     def forward(self, x):
         out = x
-        z_sample, (z_mean, z_log_var) = self.encoder(out)
+        z_sample, (z_mean, z_log_var, guess_out) = self.encoder(out)
         cl = self.classifier(z_sample)
         out = self.decoder(z_sample)
-        return out, (cl, z_sample, z_mean, z_log_var)
+        return out, (cl, z_sample, z_mean, z_log_var, guess_out)
