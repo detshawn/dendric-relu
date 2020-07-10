@@ -61,6 +61,7 @@ def train(model, opt, device,
         pred_cnt = {'total': 0, 'true': 0}
         val_pred_cnt = {'total': 0, 'true': 0}
         val_iter = iter(val_dataloader)
+        distr = {'z_means': [], 'y_labels': [], 'i_successes': []}
         model.train()
         for i, data in enumerate(iter(train_dataloader)):
             opt.zero_grad()
@@ -72,10 +73,11 @@ def train(model, opt, device,
             # forward
             y, (cl, z_sample, z_mean, z_log_var) = model(x)
             # predict classification
-            pred = (torch.argmax(cl, dim=1) == target).detach().cpu().numpy().sum()
+            pred = (torch.argmax(cl, dim=1) == target).detach().cpu().numpy()
+            pred_sum = pred.sum()
 
             pred_cnt['total'] = pred_cnt['total'] + x.size()[0]
-            pred_cnt['true'] = pred_cnt['true'] + pred
+            pred_cnt['true'] = pred_cnt['true'] + pred_sum
 
             # losses
             mse_loss = mse_fn(y, x)
@@ -88,6 +90,9 @@ def train(model, opt, device,
                           'ce': ce_loss.clone().detach().cpu(), 'kl': kl_loss.clone().detach().cpu()},
                 'acc': {'acc': pred_cnt["true"]/pred_cnt["total"]}
             }
+            distr['z_means'].append(z_mean.clone().detach().cpu().numpy())
+            distr['y_labels'].append(target.clone().detach().cpu().numpy())
+            distr['i_successes'].append(pred)
 
             # backward
             loss.backward()
@@ -106,6 +111,16 @@ def train(model, opt, device,
                 losses['kl_loss'].append(kl_loss)
                 losses['accuracy'].append(accuracy)
                 pred_cnt = {'total': 0, 'true': 0}
+
+                if epoch % 20 == 0:
+                    distr['z_means'] = np.concatenate(distr['z_means'], axis=0)
+                    distr['y_labels'] = np.concatenate(distr['y_labels'], axis=0)
+                    distr['i_successes'] = np.concatenate(distr['i_successes'], axis=0)
+
+                    fig = plot_results((distr['z_means'], distr['y_labels'], distr['i_successes']), tag=args.tag)
+                    img = fig2rgb_array(fig, expand=False)
+                    logger.image_summary(f'{args.tag}/train', img, epoch * len(train_dataloader) + i + 1, dataformats='HWC')
+                distr = {'z_means': [], 'y_labels': [], 'i_successes': []}
 
             del x, y, target
             del loss, mse_loss, ce_loss, kl_loss
