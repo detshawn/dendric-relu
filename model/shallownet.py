@@ -43,6 +43,25 @@ class Encoder(nn.Module):
         self.guess_nets = nn.ModuleList(guess_nets)
         self.guesser = nn.Linear(in_features=guess_concat_length, out_features=1)
 
+        ext_layer_config = config['ext_layers']
+        ext_layers = []
+        self.dendric = dendric
+        for i in range(0, len(layer_config)-2):
+            in_features = ext_layer_config[i] + (layer_config[i] if i == 1 else 0)
+            layer = nn.Sequential()
+            if self.dendric and i != 0:
+                hypers, hypos = [pow(2, 3-i)] * pow(2, 4-i), [pow(2, 3-i)] * pow(2, 4-i)
+                layer.add_module(f'dl{i}', DendricLinear(in_features=in_features, out_features=ext_layer_config[i+1],
+                                                        hypers=hypers, hypos=hypos, multi_position=multi_position))
+            else:
+                layer.add_module(f'l{i}', nn.Linear(in_features=in_features, out_features=ext_layer_config[i+1]))
+            layer.add_module(f'bn{i}', nn.BatchNorm1d(num_features=ext_layer_config[i+1]))
+            ext_layers.append(layer)
+        two_layers = [nn.Linear(in_features=layer_config[-2]+ext_layer_config[-2], out_features=layer_config[-1]),
+                      nn.Linear(in_features=layer_config[-2]+ext_layer_config[-2], out_features=layer_config[-1])]
+        ext_layers.append(nn.ModuleList(two_layers))
+        self.ext_layers = nn.ModuleList(ext_layers)
+
         self.do = nn.Dropout(p=0.15) if dropout else None
         self.relu = nn.ReLU()
         self.sigmoid = nn.Sigmoid()
@@ -61,15 +80,16 @@ class Encoder(nn.Module):
         epsilon = torch.randn_like(z_mean)
         return z_mean + torch.exp(0.5*z_log_var) * epsilon
 
-    def forward(self, x):
+    def forward(self, x, dropout=True, guess=False, ext_training=False):
         out = x
+        outs = []
         guess_in = []
         for i, l in enumerate(self.layers[:-1]):
             out = l(out)
-            if self.do is not None:
+            if self.do is not None and dropout:
                 out = self.do(out)
             out = self.relu(out)
-
+            outs.append(out.clone().detach())
             if f'{i+1}' in self.guess_nets_flag:
                 guess_in.append(self.guess_nets_flag[f'{i+1}'](out.clone().detach()))
 
@@ -77,8 +97,40 @@ class Encoder(nn.Module):
         guess_out = self.guesser(guess_out)
         guess_out = self.sigmoid(guess_out)
 
-        z_mean= self.layers[-1][0](out)
-        z_log_var = self.layers[-1][1](out)
+        if guess:
+            if ext_training:
+                out = x
+                for i, l in enumerate(self.ext_layers[:-1]):
+                    out = torch.cat((outs[i-1], out), dim=1) if i == 1 else out
+                    out = l(out)
+                    if self.do is not None and dropout:
+                        out = self.do(out)
+                    out = self.relu(out)
+
+                out = torch.cat((outs[-1], out), dim=1)
+                z_mean = self.ext_layers[-1][0](out)
+                z_log_var = self.ext_layers[-1][1](out)
+            else:
+                guessed_mask = guess_out < .5
+                out = out * (~guessed_mask).view(out.size()[0], -1).repeat((1, out.size()[1]))
+                z_mean = self.layers[-1][0](out)
+                z_log_var = self.layers[-1][1](out)
+
+                out = x * guessed_mask.view(x.size()[0], -1).repeat((1, x.size()[1]))
+                for i, l in enumerate(self.ext_layers[:-1]):
+                    out = torch.cat((outs[i - 1], out), dim=1) if i == 1 else out
+                    out = l(out)
+                    if self.do is not None and dropout:
+                        out = self.do(out)
+                    out = self.relu(out)
+
+                out = torch.cat((outs[-1], out), dim=1)
+                z_mean = z_mean + self.ext_layers[-1][0](out)
+                z_log_var = z_log_var + self.ext_layers[-1][1](out)
+
+        else:
+            z_mean = self.layers[-1][0](out)
+            z_log_var = self.layers[-1][1](out)
 
         z = self._sampling(z_mean, z_log_var)
 
@@ -108,11 +160,11 @@ class Decoder(nn.Module):
         self.relu = nn.ReLU()
         self.sigmoid = nn.Sigmoid()
 
-    def forward(self, x):
+    def forward(self, x, dropout=True):
         out = x
         for l in self.layers[:-1]:
             out = l(out)
-            if self.do is not None:
+            if self.do is not None and dropout:
                 out = self.do(out)
             out = self.relu(out)
 
@@ -145,11 +197,11 @@ class Classifier(nn.Module):
         self.do = nn.Dropout(p=0.15) if dropout else None
         self.relu = nn.ReLU()
 
-    def forward(self, x):
+    def forward(self, x, dropout=True):
         out = x
         for l in self.layers[:-1]:
             out = l(out)
-            if self.do is not None:
+            if self.do is not None and dropout:
                 out = self.do(out)
             out = self.relu(out)
         out = self.layers[-1](out)
@@ -177,9 +229,9 @@ class ShallowNet(nn.Module):
         self.classifier = Classifier(self.config['Classifier'], dendric=dendric, multi_position=multi_position)
         self.decoder = Decoder(self.config['Decoder'], dendric=dendric, multi_position=multi_position)
 
-    def forward(self, x):
+    def forward(self, x, dropout=True, guess=False, ext_training=True):
         out = x
-        z_sample, (z_mean, z_log_var, guess_out) = self.encoder(out)
-        cl = self.classifier(z_sample)
-        out = self.decoder(z_sample)
+        z_sample, (z_mean, z_log_var, guess_out) = self.encoder(out, dropout=dropout, guess=guess, ext_training=ext_training)
+        cl = self.classifier(z_sample, dropout=dropout)
+        out = self.decoder(z_sample, dropout=dropout)
         return out, (cl, z_sample, z_mean, z_log_var, guess_out)
