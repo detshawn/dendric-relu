@@ -7,7 +7,7 @@ class Encoder(nn.Module):
     def __init__(self, config, dropout=True, dendric=False, multi_position=1):
         super(Encoder, self).__init__()
         layer_config = config['layers']
-        guess_net_config = config['guess_net']
+        self.is_guess_net = ('guess_net' in config)
 
         layers = []
         self.dendric = dendric
@@ -26,41 +26,43 @@ class Encoder(nn.Module):
         layers.append(nn.ModuleList(two_layers))
         self.layers = nn.ModuleList(layers)
 
-        guess_nets = []
-        guess_concat_length = 0
-        self.guess_nets_flag = {}
-        for i in range(len(guess_net_config)):
-            if len(guess_net_config[i]) > 0:
-                guess_net = nn.Sequential()
-                in_features = layer_config[i]
-                for j, guess_l in enumerate(guess_net_config[i]):
-                    guess_net.add_module(f'guess_l{j}', nn.Linear(in_features=in_features, out_features=guess_l))
-                    guess_net.add_module(f'bn{j}', nn.BatchNorm1d(num_features=guess_l))
-                    in_features = guess_l
-                guess_nets.append(guess_net)
-                self.guess_nets_flag[f'{i}'] = guess_net
-                guess_concat_length += in_features
-        self.guess_nets = nn.ModuleList(guess_nets)
-        self.guesser = nn.Linear(in_features=guess_concat_length, out_features=1)
+        if self.is_guess_net:
+            guess_net_config = config['guess_net']
+            guess_nets = []
+            guess_concat_length = 0
+            self.guess_nets_flag = {}
+            for i in range(len(guess_net_config)):
+                if len(guess_net_config[i]) > 0:
+                    guess_net = nn.Sequential()
+                    in_features = layer_config[i]
+                    for j, guess_l in enumerate(guess_net_config[i]):
+                        guess_net.add_module(f'guess_l{j}', nn.Linear(in_features=in_features, out_features=guess_l))
+                        guess_net.add_module(f'bn{j}', nn.BatchNorm1d(num_features=guess_l))
+                        in_features = guess_l
+                    guess_nets.append(guess_net)
+                    self.guess_nets_flag[f'{i}'] = guess_net
+                    guess_concat_length += in_features
+            self.guess_nets = nn.ModuleList(guess_nets)
+            self.guesser = nn.Linear(in_features=guess_concat_length, out_features=1)
 
-        ext_layer_config = config['ext_layers']
-        ext_layers = []
-        self.dendric = dendric
-        for i in range(0, len(layer_config)-2):
-            in_features = ext_layer_config[i] + (layer_config[i] if i == 1 else 0)
-            layer = nn.Sequential()
-            if self.dendric and i != 0:
-                hypers, hypos = [pow(2, 3-i)] * pow(2, 4-i), [pow(2, 3-i)] * pow(2, 4-i)
-                layer.add_module(f'dl{i}', DendricLinear(in_features=in_features, out_features=ext_layer_config[i+1],
-                                                        hypers=hypers, hypos=hypos, multi_position=multi_position))
-            else:
-                layer.add_module(f'l{i}', nn.Linear(in_features=in_features, out_features=ext_layer_config[i+1]))
-            layer.add_module(f'bn{i}', nn.BatchNorm1d(num_features=ext_layer_config[i+1]))
-            ext_layers.append(layer)
-        two_layers = [nn.Linear(in_features=layer_config[-2]+ext_layer_config[-2], out_features=layer_config[-1]),
-                      nn.Linear(in_features=layer_config[-2]+ext_layer_config[-2], out_features=layer_config[-1])]
-        ext_layers.append(nn.ModuleList(two_layers))
-        self.ext_layers = nn.ModuleList(ext_layers)
+            ext_layer_config = config['ext_layers']
+            ext_layers = []
+            self.dendric = dendric
+            for i in range(0, len(layer_config)-2):
+                in_features = ext_layer_config[i] + (layer_config[i] if i == 1 else 0)
+                layer = nn.Sequential()
+                if self.dendric and i != 0:
+                    hypers, hypos = [pow(2, 3-i)] * pow(2, 4-i), [pow(2, 3-i)] * pow(2, 4-i)
+                    layer.add_module(f'dl{i}', DendricLinear(in_features=in_features, out_features=ext_layer_config[i+1],
+                                                            hypers=hypers, hypos=hypos, multi_position=multi_position))
+                else:
+                    layer.add_module(f'l{i}', nn.Linear(in_features=in_features, out_features=ext_layer_config[i+1]))
+                layer.add_module(f'bn{i}', nn.BatchNorm1d(num_features=ext_layer_config[i+1]))
+                ext_layers.append(layer)
+            two_layers = [nn.Linear(in_features=layer_config[-2]+ext_layer_config[-2], out_features=layer_config[-1]),
+                          nn.Linear(in_features=layer_config[-2]+ext_layer_config[-2], out_features=layer_config[-1])]
+            ext_layers.append(nn.ModuleList(two_layers))
+            self.ext_layers = nn.ModuleList(ext_layers)
 
         self.do = nn.Dropout(p=0.15) if dropout else None
         self.relu = nn.ReLU()
@@ -89,15 +91,19 @@ class Encoder(nn.Module):
             if self.do is not None and dropout:
                 out = self.do(out)
             out = self.relu(out)
-            outs.append(out.clone().detach())
-            if f'{i+1}' in self.guess_nets_flag:
-                guess_in.append(self.guess_nets_flag[f'{i+1}'](out.clone().detach()))
 
-        guess_out = torch.cat(guess_in, dim=1)
-        guess_out = self.guesser(guess_out)
-        guess_out = self.sigmoid(guess_out)
+            if self.is_guess_net and guess:
+                outs.append(out.clone().detach())
+                if f'{i+1}' in self.guess_nets_flag:
+                    guess_in.append(self.guess_nets_flag[f'{i+1}'](out.clone().detach()))
 
-        if guess:
+        intermediates = {}
+        if self.is_guess_net and guess:
+            guess_out = torch.cat(guess_in, dim=1)
+            guess_out = self.guesser(guess_out)
+            guess_out = self.sigmoid(guess_out)
+            intermediates['guess_out'] = guess_out
+
             if ext_training:
                 out = x
                 for i, l in enumerate(self.ext_layers[:-1]):
@@ -132,9 +138,12 @@ class Encoder(nn.Module):
             z_mean = self.layers[-1][0](out)
             z_log_var = self.layers[-1][1](out)
 
+        intermediates['z_mean'] = z_mean
+        intermediates['z_log_var'] = z_log_var
+
         z = self._sampling(z_mean, z_log_var)
 
-        return z, (z_mean, z_log_var, guess_out)
+        return z, intermediates
 
 
 class Decoder(nn.Module):
@@ -231,7 +240,7 @@ class ShallowNet(nn.Module):
 
     def forward(self, x, dropout=True, guess=False, ext_training=True):
         out = x
-        z_sample, (z_mean, z_log_var, guess_out) = self.encoder(out, dropout=dropout, guess=guess, ext_training=ext_training)
+        z_sample, enc_intermediates = self.encoder(out, dropout=dropout, guess=guess, ext_training=ext_training)
         cl = self.classifier(z_sample, dropout=dropout)
         out = self.decoder(z_sample, dropout=dropout)
-        return out, (cl, z_sample, z_mean, z_log_var, guess_out)
+        return out, (cl, z_sample, enc_intermediates)

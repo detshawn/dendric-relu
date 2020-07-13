@@ -84,7 +84,7 @@ def train(model, opt, device,
             if extended_clock == 0:
                 print(f'extended_clock: {extended_clock}, extended_indices: {len(extended_indices)}')
                 if len(extended_indices) > 0:
-                    print(f'extended_indices[{len(extended_indices)}]: {extended_indices}')
+                    print(f'extended_indices[{len(extended_indices)}]')
                     train_dataloader = DataLoader(dataset=train_dataset,
                                                   batch_size=args.batch_size,
                                                   sampler=SubsetRandomSampler(extended_indices))
@@ -113,11 +113,13 @@ def train(model, opt, device,
             target = target.to(device)
 
             # forward
-            y, (cl, z_sample, z_mean, z_log_var, guess_out) = model(x, guess=guess, ext_training=(extended_clock > 0))
+            y, (cl, z_sample, enc_intermediates) = model(x, guess=guess, ext_training=(extended_clock > 0))
+            z_mean = enc_intermediates['z_mean']
+            z_log_var = enc_intermediates['z_log_var']
+            pred = (torch.argmax(cl, dim=1) == target).detach()
             # predict classification
-            _, (cl_eval, _, _, _, guess_out_eval) = model(x, dropout=False, guess=guess, ext_training=False)
-            pred = (torch.argmax(cl_eval, dim=1) == target).detach()
-            guess_pred = ((guess_out_eval>=.5) == pred).detach()
+            _, (cl_eval, _, enc_intermediates_eval) = model(x, dropout=False, guess=guess, ext_training=False)
+            pred_eval = (torch.argmax(cl_eval, dim=1) == target).detach()
 
             # losses
             mse_loss = mse_fn(y, x)
@@ -131,8 +133,11 @@ def train(model, opt, device,
             meta['loss']['total'] = loss.clone().detach().cpu()
 
             if guess:
+                guess_out = enc_intermediates['guess_out']
+                guess_out_eval = enc_intermediates_eval['guess_out']
                 guess_bce_loss = guess_bce_fn(guess_out.double(), pred.double())
                 guess_pred = ((guess_out >= .5) == pred.view(-1, 1)).detach()
+                guess_pred_eval = ((guess_out_eval >= .5) == pred.view(-1, 1)).detach()
                 meta['loss']['guess_bce'] = guess_bce_loss.clone().detach().cpu()
 
                 loss = loss + guess_bce_loss
@@ -216,9 +221,10 @@ def train(model, opt, device,
                 val_x = val_x.to(device)
                 val_target = val_target.to(device)
                 with torch.no_grad():
-                    val_y, (val_cl, val_z_sample, val_z_mean, val_z_log_var, val_guess_out) = model(val_x, guess=guess, ext_training=False)
+                    val_y, (val_cl, val_z_sample, val_enc_intermediates) = model(val_x, guess=guess, ext_training=False)
+                    val_z_mean = val_enc_intermediates['z_mean']
+                    val_z_log_var = val_enc_intermediates['z_log_var']
                     val_pred = (torch.argmax(val_cl, dim=1) == val_target).detach()
-                    val_guess_pred = ((val_guess_out >= .5) == val_pred.view(-1, 1)).detach()
 
                     val_mse_loss = mse_fn(val_y, val_x)
                     val_ce_loss = ce_fn(val_cl, val_target)
@@ -231,6 +237,9 @@ def train(model, opt, device,
                     val_meta['loss']['val_total'] = val_loss.clone().detach().cpu()
 
                     if guess:
+                        val_guess_out = val_enc_intermediates['guess_out']
+                        val_guess_pred = ((val_guess_out >= .5) == val_pred.view(-1, 1)).detach()
+
                         val_guess_bce_loss = guess_bce_fn(val_guess_out.double(), val_pred.double())
                         val_meta['loss']['val_guess_bce'] = val_guess_bce_loss.clone().detach().cpu()
 
@@ -391,7 +400,7 @@ if __name__ == "__main__":
     parser.add_argument('-config', required=True)
     parser.add_argument('-batch-size', default=8, type=int)
     parser.add_argument('-epochs', default=64, type=int)
-    parser.add_argument('-guess-trigger-epoch', default=10, type=int)
+    parser.add_argument('-guess-trigger-epoch', type=int)
     parser.add_argument('-extended-clock-timer', default=10, type=int)
     parser.add_argument('-tag', default='nonetag')
     parser.add_argument('--dendric', action='store_true')
@@ -399,4 +408,8 @@ if __name__ == "__main__":
     parser.add_argument('-display-step', default=300, type=int)
     parser.add_argument('-multi-position', default=1, type=int)
     args = parser.parse_args()
+
+    if not args.guess_trigger_epoch:
+        args.guess_trigger_epoch = args.epochs
+
     main()
