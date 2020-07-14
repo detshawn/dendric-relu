@@ -113,15 +113,17 @@ def train(model, opt, device,
             target = target.to(device)
 
             # forward
-            y, (cl, z_sample, enc_intermediates) = model(x, guess=guess, ext_training=(extended_clock > 0))
+            y, (cl, z_sample, enc_intermediates) = model(x,
+                                                         enc_kwargs=dict(guess=guess, ext_training=(extended_clock > 0)))
             z_mean = enc_intermediates['z_mean']
             z_log_var = enc_intermediates['z_log_var']
             pred = (torch.argmax(cl, dim=1) == target).detach()
             # predict classification
-            _, (cl_eval, _, enc_intermediates_eval) = model(x, dropout=False, guess=guess, ext_training=False)
+            _, (cl_eval, _, enc_intermediates_eval) = model(x, dropout=False,
+                                                            enc_kwargs=dict(guess=guess))
             pred_eval = (torch.argmax(cl_eval, dim=1) == target).detach()
 
-            focal_kwargs = dict(gamma=(args.gamma * sigmoid((epoch / epochs - 3/5)/5))) if args.focal_loss else {}
+            focal_kwargs = dict(gamma=(args.gamma * (math.sin((max(epoch-3/5*epochs, 0))/20*(2*math.pi))+1)/2)) if args.focal_loss else {}
             # losses
             mse_loss = mse_fn(y, x)
             ce_loss = ce_fn(cl, target, **focal_kwargs)
@@ -223,7 +225,7 @@ def train(model, opt, device,
                 val_x = val_x.to(device)
                 val_target = val_target.to(device)
                 with torch.no_grad():
-                    val_y, (val_cl, val_z_sample, val_enc_intermediates) = model(val_x, guess=guess, ext_training=False)
+                    val_y, (val_cl, val_z_sample, val_enc_intermediates) = model(val_x, enc_kwargs=dict(guess=guess))
                     val_z_mean = val_enc_intermediates['z_mean']
                     val_z_log_var = val_enc_intermediates['z_log_var']
                     val_pred = (torch.argmax(val_cl, dim=1) == val_target).detach()
@@ -371,11 +373,11 @@ def test_MNIST():
         config = yaml.load(f)
     # print(f'config: {config}')
 
+    sub_kwargs = dict(dendric=args.dendric, multi_position=args.multi_position)
     in_features = train_dataset[0][1].shape[0]
     model = ShallowNet(in_features=in_features, out_features=8,
                        config=config['ShallowNet'],
-                       dendric=args.dendric,
-                       multi_position=args.multi_position)
+                       sub_kwargs=sub_kwargs)
     model = model.to(device)
     print(model)
     print(f'# parameters: {sum(p.numel() for p in model.parameters())}')

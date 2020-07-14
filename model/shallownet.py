@@ -219,7 +219,7 @@ class Classifier(nn.Module):
 
 
 class ShallowNet(nn.Module):
-    def __init__(self, in_features, out_features, n_hiddens=2, config=None, dendric=False, multi_position=1):
+    def __init__(self, in_features, out_features, n_hiddens=2, config=None, sub_kwargs=None):
         super(ShallowNet, self).__init__()
         self.config = config
         if config is None:
@@ -234,13 +234,15 @@ class ShallowNet(nn.Module):
             self.layer_config['Classifier']['layers'] = [out_features, 8, 10]
             self.layer_config['Decoder']['layers'] = encoder_config[-1::-1]
 
-        self.encoder = Encoder(self.config['Encoder'], dendric=dendric, multi_position=multi_position)
-        self.classifier = Classifier(self.config['Classifier'], dendric=dendric, multi_position=multi_position)
-        self.decoder = Decoder(self.config['Decoder'], dendric=dendric, multi_position=multi_position)
+        sub_kwargs = sub_kwargs or {}
+        self.encoder = Encoder(self.config['Encoder'], **sub_kwargs)
+        self.classifier = Classifier(self.config['Classifier'], **sub_kwargs)
+        self.decoder = Decoder(self.config['Decoder'], **sub_kwargs)
 
-    def forward(self, x, dropout=True, guess=False, ext_training=True):
+    def forward(self, x, dropout=True, enc_kwargs=None):
+        enc_kwargs = enc_kwargs or {}
         out = x
-        z_sample, enc_intermediates = self.encoder(out, dropout=dropout, guess=guess, ext_training=ext_training)
+        z_sample, enc_intermediates = self.encoder(out, dropout=dropout, **enc_kwargs)
         cl = self.classifier(z_sample, dropout=dropout)
         out = self.decoder(z_sample, dropout=dropout)
         return out, (cl, z_sample, enc_intermediates)
