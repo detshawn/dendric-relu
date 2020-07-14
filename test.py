@@ -87,7 +87,8 @@ def train(model, opt, device,
                     print(f'extended_indices[{len(extended_indices)}]')
                     train_dataloader = DataLoader(dataset=train_dataset,
                                                   batch_size=args.batch_size,
-                                                  sampler=SubsetRandomSampler(extended_indices))
+                                                  sampler=SubsetRandomSampler(extended_indices),
+                                                  drop_last=True)
                     print(f'train_dataloader (for sampling): {len(train_dataloader)}')
                     extended_clock = args.extended_clock_timer
                 else:
