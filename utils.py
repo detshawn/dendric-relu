@@ -4,6 +4,28 @@ from tensorboardX import SummaryWriter
 from sklearn.manifold import TSNE
 import os
 import matplotlib.pyplot as plt
+import math
+
+
+def sigmoid(x):
+    return 1/(1+math.exp(-x))
+
+
+def build_focal_loss(_gamma):
+    logsoftmax = torch.nn.LogSoftmax(dim=1)
+
+    def focal_loss_fn(x, target, gamma=_gamma):
+        log_p = logsoftmax(x)
+        weights = (1-torch.exp(log_p)).pow(gamma)
+        loss = []
+        mean_factor = []
+        for log_p_i, target_i, w_i in zip(log_p, target, weights):
+            weight = w_i[target_i]
+            loss.append(-weight * log_p_i[target_i])
+            mean_factor.append(weight)
+        loss = torch.stack(loss, dim=0).sum() / torch.stack(mean_factor, dim=0).sum()
+        return loss
+    return focal_loss_fn
 
 
 def KLLoss(z_mean, z_log_var):

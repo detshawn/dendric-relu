@@ -50,7 +50,7 @@ def train(model, opt, device,
           epochs, display_step):
     logger = Logger()
     mse_fn = torch.nn.MSELoss()
-    ce_fn = torch.nn.CrossEntropyLoss()
+    ce_fn = build_focal_loss(args.gamma) if args.focal_loss else torch.nn.CrossEntropyLoss()
     kl_fn = KLLoss
     guess_bce_fn = torch.nn.BCELoss()
 
@@ -121,9 +121,10 @@ def train(model, opt, device,
             _, (cl_eval, _, enc_intermediates_eval) = model(x, dropout=False, guess=guess, ext_training=False)
             pred_eval = (torch.argmax(cl_eval, dim=1) == target).detach()
 
+            focal_kwargs = dict(gamma=(args.gamma * sigmoid((epoch / epochs - 3/5)/5))) if args.focal_loss else {}
             # losses
             mse_loss = mse_fn(y, x)
-            ce_loss = ce_fn(cl, target)
+            ce_loss = ce_fn(cl, target, **focal_kwargs)
             kl_loss = kl_fn(z_mean, z_log_var)
             loss = mse_loss + ce_loss + kl_loss
 
@@ -145,10 +146,11 @@ def train(model, opt, device,
 
             # predict classification
             pred = pred.cpu().numpy()
-            pred_sum = pred.sum()
+            pred_eval = pred_eval.cpu().numpy()
+            pred_eval_sum = pred_eval.sum()
 
             pred_cnt['total'] = pred_cnt['total'] + x.size()[0]
-            pred_cnt['true'] = pred_cnt['true'] + pred_sum
+            pred_cnt['true'] = pred_cnt['true'] + pred_eval_sum
             if guess:
                 guess_pred = guess_pred.cpu().numpy()
                 pred_cnt['guess_true_pos'] = pred_cnt['guess_true_pos'] + guess_pred[pred == 1].sum()
@@ -227,7 +229,7 @@ def train(model, opt, device,
                     val_pred = (torch.argmax(val_cl, dim=1) == val_target).detach()
 
                     val_mse_loss = mse_fn(val_y, val_x)
-                    val_ce_loss = ce_fn(val_cl, val_target)
+                    val_ce_loss = ce_fn(val_cl, val_target, **focal_kwargs)
                     val_kl_loss = kl_fn(val_z_mean, val_z_log_var)
                     val_loss = val_mse_loss + val_ce_loss + val_kl_loss
 
@@ -407,6 +409,10 @@ if __name__ == "__main__":
     parser.add_argument('-val-set-ratio', default=0.1, type=float)
     parser.add_argument('-display-step', default=300, type=int)
     parser.add_argument('-multi-position', default=1, type=int)
+
+    parser.add_argument('--focal-loss', action='store_true')
+    parser.add_argument('-gamma', default=2, type=float)
+
     args = parser.parse_args()
 
     if not args.guess_trigger_epoch:
