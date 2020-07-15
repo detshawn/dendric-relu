@@ -6,3 +6,4 @@ matplotlib
 python-mnist
 pyyaml
 sklearn
+scipy

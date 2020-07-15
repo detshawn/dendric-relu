@@ -2,6 +2,11 @@ from torch import nn
 import torch
 from .activations import DendricLinear
 
+import numpy as np
+from sklearn.metrics import roc_curve
+from scipy.optimize import brentq
+from scipy.interpolate import interp1d
+
 
 class Encoder(nn.Module):
     def __init__(self, config, dropout=True, dendric=False, multi_position=1):
@@ -219,9 +224,10 @@ class Classifier(nn.Module):
 
 
 class ShallowNet(nn.Module):
-    def __init__(self, in_features, out_features, n_hiddens=2, config=None, sub_kwargs=None):
+    def __init__(self, in_features, out_features, device, n_hiddens=2, config=None, sub_kwargs=None):
         super(ShallowNet, self).__init__()
         self.config = config
+        self.device = device
         if config is None:
             self.config = {'Encoder':{}, 'Decoder':{}, 'Classifier':{}}
             encoder_config = [in_features]
@@ -239,6 +245,12 @@ class ShallowNet(nn.Module):
         self.classifier = Classifier(self.config['Classifier'], **sub_kwargs)
         self.decoder = Decoder(self.config['Decoder'], **sub_kwargs)
 
+        # Cosine similarity scaling (with fixed initial parameter values)
+        self.similarity_weight = nn.Parameter(torch.tensor([10.], device=device))
+        self.similarity_bias = nn.Parameter(torch.tensor([-5.], device=device))
+        # Loss
+        self.ge2e_loss_fn = nn.CrossEntropyLoss()
+
     def forward(self, x, dropout=True, enc_kwargs=None):
         enc_kwargs = enc_kwargs or {}
         out = x
@@ -246,3 +258,80 @@ class ShallowNet(nn.Module):
         cl = self.classifier(z_sample, dropout=dropout)
         out = self.decoder(z_sample, dropout=dropout)
         return out, (cl, z_sample, enc_intermediates)
+
+    def similarity_matrix(self, embeds):
+        """
+        Computes the similarity matrix according the section 2.1 of GE2E.
+
+        :param embeds: the embeddings as a tensor of shape (speakers_per_batch,
+        utterances_per_speaker, embedding_size)
+        :return: the similarity matrix as a tensor of shape (speakers_per_batch,
+        utterances_per_speaker, speakers_per_batch)
+        """
+        speakers_per_batch, utterances_per_speaker = embeds.shape[:2]
+
+        # Inclusive centroids (1 per speaker). Cloning is needed for reverse differentiation
+        centroids_incl = torch.mean(embeds, dim=1, keepdim=True)
+        centroids_incl = centroids_incl.clone() / torch.norm(centroids_incl, dim=2, keepdim=True)
+
+        # Exclusive centroids (1 per utterance)
+        centroids_excl = (torch.sum(embeds, dim=1, keepdim=True) - embeds)
+        centroids_excl /= (utterances_per_speaker - 1)
+        centroids_excl = centroids_excl.clone() / torch.norm(centroids_excl, dim=2, keepdim=True)
+
+        # Similarity matrix. The cosine similarity of already 2-normed vectors is simply the dot
+        # product of these vectors (which is just an element-wise multiplication reduced by a sum).
+        # We vectorize the computation for efficiency.
+        sim_matrix = torch.zeros(speakers_per_batch, utterances_per_speaker,
+                                 speakers_per_batch).to(self.device)
+        mask_matrix = 1 - np.eye(speakers_per_batch, dtype=np.int)
+        for j in range(speakers_per_batch):
+            mask = np.where(mask_matrix[j])[0]
+            sim_matrix[mask, :, j] = (embeds[mask] * centroids_incl[j]).sum(dim=2)
+            sim_matrix[j, :, j] = (embeds[j] * centroids_excl[j]).sum(dim=1)
+
+        ## Even more vectorized version (slower maybe because of transpose)
+        # sim_matrix2 = torch.zeros(speakers_per_batch, speakers_per_batch,
+        #                             utterances_per_speaker).to(self.device)
+        # eye = np.eye(speakers_per_batch, dtype=np.int)
+        # mask = np.where(1 - eye)
+        # sim_matrix2[mask] = (embeds[mask[0]] * centroids_incl[mask[1]]).sum(dim=2)
+        # mask = np.where(eye)
+        # sim_matrix2[mask] = (embeds * centroids_excl).sum(dim=2)
+        # sim_matrix2 = sim_matrix2.transpose(1, 2)
+
+        sim_matrix = sim_matrix * self.similarity_weight + self.similarity_bias
+        return sim_matrix
+
+    def ge2e_loss(self, embeds):
+        """
+        Computes the softmax loss according the section 2.1 of GE2E.
+
+        :param embeds: the embeddings as a tensor of shape (speakers_per_batch,
+        utterances_per_speaker, embedding_size)
+        :return: the loss and the EER for this batch of embeddings.
+        """
+        speakers_per_batch, utterances_per_speaker = embeds.shape[:2]
+
+        # Loss
+        sim_matrix = self.similarity_matrix(embeds)
+        sim_matrix = sim_matrix.reshape((speakers_per_batch * utterances_per_speaker,
+                                         speakers_per_batch))
+        ground_truth = np.repeat(np.arange(speakers_per_batch), utterances_per_speaker)
+        target = torch.from_numpy(ground_truth).long().to(self.device)
+        loss = self.ge2e_loss_fn(sim_matrix, target)
+
+        # EER (not backpropagated)
+        with torch.no_grad():
+            inv_argmax = lambda i: np.eye(1, speakers_per_batch, i, dtype=np.int)[0]
+            labels = np.array([inv_argmax(i) for i in ground_truth])
+            preds = sim_matrix.detach().to('cpu').numpy()
+
+            # Snippet from https://yangcha.github.io/EER-ROC/
+            try:
+                fpr, tpr, thresholds = roc_curve(labels.flatten(), preds.flatten())
+                eer = brentq(lambda x: 1. - x - interp1d(fpr, tpr)(x), 0., 1.)
+            except:
+                eer = 0.0
+
+        return loss, eer

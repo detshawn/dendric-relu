@@ -2,6 +2,7 @@ from model.activations import Hyper, Hypo
 from torch.utils.data import Dataset, DataLoader, SubsetRandomSampler
 import matplotlib.pyplot as plt
 import matplotlib.colors as colors
+from functools import reduce
 
 from mnist import MNIST
 from utils import *
@@ -73,6 +74,8 @@ def train(model, opt, device,
     for epoch in range(init_epoch, epochs):
         print(f':: {epoch}-th epoch >>>')
 
+        embeds_for_ge2e = [[] for i in range(10)]
+
         pred_cnt = {'total': 0, 'true': 0,
                     'guess_true_pos': 0, 'guess_true_neg': 0,
                     'guess_false_pos': 0, 'guess_false_neg': 0}
@@ -125,8 +128,8 @@ def train(model, opt, device,
             # predict classification
             _, (cl_eval, _, enc_intermediates_eval) = model(x, dropout=False,
                                                             enc_kwargs=dict(guess=guess))
-            if (epoch + 1) % log_step == 0:
-                for r, c in zip(torch.argmax(cl_eval, dim=1).clone().detach().cpu().numpy(), target.clone().detach().cpu().numpy()):
+            if (epoch + 1) % log_step == 0 or (epoch + 1) == epochs:
+                for r, c in zip(torch.argmax(cl_eval, dim=1), target):
                     if r != c:
                         hist_pairs[r, c] = hist_pairs[r, c] + 1
             pred_eval = (torch.argmax(cl_eval, dim=1) == target).detach()
@@ -138,10 +141,27 @@ def train(model, opt, device,
             kl_loss = kl_fn(z_mean, z_log_var)
             loss = mse_loss + ce_loss + kl_loss
 
-            meta['loss']['mse'] = mse_loss.clone().detach().cpu()
-            meta['loss']['ce'] = ce_loss.clone().detach().cpu()
-            meta['loss']['kl'] = kl_loss.clone().detach().cpu()
-            meta['loss']['total'] = loss.clone().detach().cpu()
+            meta['loss']['mse'] = mse_loss.item()
+            meta['loss']['ce'] = ce_loss.item()
+            meta['loss']['kl'] = kl_loss.item()
+            meta['loss']['total'] = loss.item()
+
+            if args.ge2e_loss:
+                for emb, t in zip(z_mean, target):
+                    embeds_for_ge2e[t].append(emb)
+                if (i+1) % args.ge2e_step == 0:
+                    n_min_samples = 12
+                    embeds_for_ge2e_input = [torch.stack(e, dim=0).clone() for e in embeds_for_ge2e if len(e) >= n_min_samples]
+                    if len(embeds_for_ge2e_input) > 2:
+                        rect_n = reduce(lambda x, y: min(x, y.size()[0]), embeds_for_ge2e_input, n_min_samples)
+                        embeds_for_ge2e_input = [e[:rect_n, :] for e in embeds_for_ge2e_input]
+                        embeds_for_ge2e_input = torch.stack(embeds_for_ge2e_input, dim=0)
+                        ge2e_loss, eer = model.ge2e_loss(embeds_for_ge2e_input)
+
+                        meta['loss']['ge2e'] = ge2e_loss.item() * .1
+                        meta['loss']['total'] = meta['loss']['total'] + meta['loss']['ge2e']
+
+                        embeds_for_ge2e = [[] for i in range(10)]
 
             if guess:
                 guess_out = enc_intermediates['guess_out']
@@ -149,7 +169,7 @@ def train(model, opt, device,
                 guess_bce_loss = guess_bce_fn(guess_out.double(), pred.double())
                 guess_pred = ((guess_out >= .5) == pred.view(-1, 1)).detach()
                 guess_pred_eval = ((guess_out_eval >= .5) == pred.view(-1, 1)).detach()
-                meta['loss']['guess_bce'] = guess_bce_loss.clone().detach().cpu()
+                meta['loss']['guess_bce'] = guess_bce_loss.item()
 
                 loss = loss + guess_bce_loss
                 meta['loss']['total'] = meta['loss']['total'] + meta['loss']['guess_bce']
@@ -190,6 +210,9 @@ def train(model, opt, device,
                     meta['acc']['guess_acc'] = (pred_cnt["guess_true_pos"]+pred_cnt["guess_true_neg"]) / pred_cnt["total"]
                     guess_acc = meta['acc']['guess_acc']
                     acc_print += f' \t               \tguess_acc={guess_acc:.2f}'
+                if args.ge2e_loss:
+                    loss_print += f'\tge2e_loss={ge2e_loss:.5f}'
+
                 print(loss_print)
                 print(acc_print)
 
@@ -205,22 +228,7 @@ def train(model, opt, device,
                             'guess_true_pos': 0, 'guess_true_neg': 0,
                             'guess_false_pos': 0, 'guess_false_neg': 0}
 
-                if (epoch + 1) % log_step == 0:
-                    if (i + 1) == len(train_dataloader):
-                        fig, ax = plt.subplots(1)
-                        ax.xaxis.tick_top()
-                        plt.gca().invert_yaxis()
-                        p = ax.pcolormesh(hist_pairs / hist_pairs.sum(), cmap=plt.cm.Reds,
-                                          norm=colors.PowerNorm(gamma=0.5))
-                        fig.colorbar(p, label='freq (log scale)')
-                        ax.set_xlabel('target')
-                        ax.set_ylabel('pred')
-                        ax.set_title('Misclassification map')
-                        fig.savefig('test_hist_pairs.png')
-                        img = fig2rgb_array(fig, expand=False)
-                        logger.image_summary(f'{args.tag}/train_hist_pairs', img, epoch, dataformats='HWC')
-                        plt.close(fig)
-
+                if (epoch + 1) % log_step == 0 or (epoch + 1) == epochs:
                     if (i + 1) == display_step:
                         distr['z_means'] = np.concatenate(distr['z_means'], axis=0)
                         distr['y_labels'] = np.concatenate(distr['y_labels'], axis=0)
@@ -231,7 +239,21 @@ def train(model, opt, device,
                         logger.image_summary(f'{args.tag}/train', img, prev_iter + i + 1, dataformats='HWC')
                         plt.close(fig)
 
-                    log_step = log_step * 2
+                    if (i + 1) == len(train_dataloader):
+                        fig, ax = plt.subplots(1)
+                        ax.xaxis.tick_top()
+                        plt.gca().invert_yaxis()
+                        p = ax.pcolormesh(hist_pairs, cmap=plt.cm.Reds,
+                                          norm=colors.PowerNorm(gamma=0.5, vmax=int(len(train_dataset)*.1*.1)))
+                        fig.colorbar(p, label='freq (log scale)')
+                        ax.set_xlabel('target')
+                        ax.set_ylabel('pred')
+                        ax.set_title('Misclassification map')
+                        fig.savefig('test_hist_pairs.png')
+                        img = fig2rgb_array(fig, expand=False)
+                        logger.image_summary(f'{args.tag}/train_hist_pairs', img, epoch, dataformats='HWC')
+                        plt.close(fig)
+                        log_step = log_step * 2
 
                 distr = {'z_means': [], 'y_labels': [], 'i_successes': []}
 
@@ -414,7 +436,7 @@ def test_MNIST():
 
     sub_kwargs = dict(dendric=args.dendric, multi_position=args.multi_position)
     in_features = train_dataset[0][1].shape[0]
-    model = ShallowNet(in_features=in_features, out_features=8,
+    model = ShallowNet(in_features=in_features, out_features=8, device=device,
                        config=config['ShallowNet'],
                        sub_kwargs=sub_kwargs)
     if args.load_model:
@@ -438,7 +460,7 @@ def test_MNIST():
     result = train(model=model, opt=opt, device=device,
                    train_dataloader=train_dl, train_dataset=train_dataset,
                    val_dataloader=val_dl,
-                   eval_step=int(1/args.val_set_ratio),
+                   eval_step=pow(2, math.floor(math.log2(int(1/args.val_set_ratio)))),
                    init_epoch=init_epoch, init_iter=init_iter, epochs=args.epochs, display_step=args.display_step)
 
     # plot_result(result, tag=args.tag)
@@ -459,12 +481,15 @@ if __name__ == "__main__":
     parser.add_argument('-tag', default='nonetag')
     parser.add_argument('--dendric', action='store_true')
     parser.add_argument('-val-set-ratio', default=0.1, type=float)
-    parser.add_argument('-display-step', default=300, type=int)
+    parser.add_argument('-display-step', default=256, type=int)
     parser.add_argument('-save-step', default=50, type=int)
     parser.add_argument('-multi-position', default=1, type=int)
 
     parser.add_argument('--focal-loss', action='store_true')
     parser.add_argument('-gamma', default=2, type=float)
+
+    parser.add_argument('--ge2e-loss', action='store_true')
+    parser.add_argument('-ge2e-step', default=16, type=float)
 
     parser.add_argument('-ckpt-model-dir', default='./ckpts/')
     parser.add_argument('--load-model', action='store_true')
