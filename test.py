@@ -47,7 +47,7 @@ def test_activation_functions():
 def train(model, opt, device,
           train_dataloader, train_dataset,
           val_dataloader, eval_step,
-          epochs, display_step):
+          init_epoch, init_iter, epochs, display_step):
     logger = Logger()
     mse_fn = torch.nn.MSELoss()
     ce_fn = build_focal_loss(args.gamma) if args.focal_loss else torch.nn.CrossEntropyLoss()
@@ -66,10 +66,10 @@ def train(model, opt, device,
     log_step = 4
     extended_indices = []
     extended_clock = 1
-    prev_iter = 0
+    prev_iter = init_iter
 
     orig_train_dataloader = train_dataloader
-    for epoch in range(epochs):
+    for epoch in range(init_epoch, epochs):
         print(f':: {epoch}-th epoch >>>')
 
         pred_cnt = {'total': 0, 'true': 0,
@@ -285,6 +285,19 @@ def train(model, opt, device,
                     del val_loss, val_mse_loss, val_ce_loss, val_kl_loss
                 del val_x, val_y, val_target
                 model.train()
+
+            if (epoch + 1) % args.save_step == 0 or (epoch+1) == epochs:
+                if not os.path.exists(args.ckpt_model_dir):
+                    os.mkdir(args.ckpt_model_dir)
+                ckpt_model_filename = f'shallownet_{args.tag}_{epoch}epoch.ckpt'
+                torch.save({
+                    'epoch': epoch,
+                    'iter': prev_iter + i,
+                    'model_state_dict': model.state_dict(),
+                    'optimizer_state_dict': opt.state_dict()
+                }, os.path.join(args.ckpt_model_dir, ckpt_model_filename))
+                print(">> ", str(epoch), "th checkpoint is saved!")
+
         prev_iter = prev_iter + len(train_dataloader)
 
     return {'losses': losses,
@@ -379,6 +392,17 @@ def test_MNIST():
     model = ShallowNet(in_features=in_features, out_features=8,
                        config=config['ShallowNet'],
                        sub_kwargs=sub_kwargs)
+    if args.load_model:
+        if os.path.exists(args.load_model_path):
+            ckpts = torch.load(args.load_model_path)
+            init_epoch = ckpts['epoch']
+            init_iter = ckpts['iter']
+            model.load_state_dict(ckpts['model_state_dict'])
+        else:
+            print(f'error: the model path ({args.load_model_path}) is invalid!')
+            exit(1)
+    else:
+        init_epoch, init_iter = 0, 0
     model = model.to(device)
     print(model)
     print(f'# parameters: {sum(p.numel() for p in model.parameters())}')
@@ -390,7 +414,7 @@ def test_MNIST():
                    train_dataloader=train_dl, train_dataset=train_dataset,
                    val_dataloader=val_dl,
                    eval_step=int(1/args.val_set_ratio),
-                   epochs=args.epochs, display_step=args.display_step)
+                   init_epoch=init_epoch, init_iter=init_iter, epochs=args.epochs, display_step=args.display_step)
 
     # plot_result(result, tag=args.tag)
 
@@ -411,10 +435,15 @@ if __name__ == "__main__":
     parser.add_argument('--dendric', action='store_true')
     parser.add_argument('-val-set-ratio', default=0.1, type=float)
     parser.add_argument('-display-step', default=300, type=int)
+    parser.add_argument('-save-step', default=50, type=int)
     parser.add_argument('-multi-position', default=1, type=int)
 
     parser.add_argument('--focal-loss', action='store_true')
     parser.add_argument('-gamma', default=2, type=float)
+
+    parser.add_argument('-ckpt-model-dir', default='./ckpts/')
+    parser.add_argument('--load-model', action='store_true')
+    parser.add_argument('-load-model-path')
 
     args = parser.parse_args()
 
