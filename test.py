@@ -1,6 +1,7 @@
 from model.activations import Hyper, Hypo
 from torch.utils.data import Dataset, DataLoader, SubsetRandomSampler
 import matplotlib.pyplot as plt
+import matplotlib.colors as colors
 
 from mnist import MNIST
 from utils import *
@@ -79,6 +80,8 @@ def train(model, opt, device,
         val_iter = iter(val_dataloader)
         distr = {'z_means': [], 'y_labels': [], 'i_successes': []}
 
+        hist_pairs = np.zeros((10, 10))
+
         guess = (epoch+1) > args.guess_trigger_epoch
         if guess:
             if extended_clock == 0:
@@ -122,6 +125,10 @@ def train(model, opt, device,
             # predict classification
             _, (cl_eval, _, enc_intermediates_eval) = model(x, dropout=False,
                                                             enc_kwargs=dict(guess=guess))
+            if (epoch + 1) % log_step == 0:
+                for r, c in zip(torch.argmax(cl_eval, dim=1).clone().detach().cpu().numpy(), target.clone().detach().cpu().numpy()):
+                    if r != c:
+                        hist_pairs[r, c] = hist_pairs[r, c] + 1
             pred_eval = (torch.argmax(cl_eval, dim=1) == target).detach()
 
             focal_kwargs = dict(gamma=(args.gamma * (math.sin((max(epoch-3/5*epochs, 0))/20*(2*math.pi))+1)/2)) if args.focal_loss else {}
@@ -198,16 +205,34 @@ def train(model, opt, device,
                             'guess_true_pos': 0, 'guess_true_neg': 0,
                             'guess_false_pos': 0, 'guess_false_neg': 0}
 
-                if (epoch+1) % log_step == 0 and (i+1) == display_step:
-                    distr['z_means'] = np.concatenate(distr['z_means'], axis=0)
-                    distr['y_labels'] = np.concatenate(distr['y_labels'], axis=0)
-                    distr['i_successes'] = np.concatenate(distr['i_successes'], axis=0)
+                if (epoch + 1) % log_step == 0:
+                    if (i + 1) == len(train_dataloader):
+                        fig, ax = plt.subplots(1)
+                        ax.xaxis.tick_top()
+                        plt.gca().invert_yaxis()
+                        p = ax.pcolormesh(hist_pairs / hist_pairs.sum(), cmap=plt.cm.Reds,
+                                          norm=colors.PowerNorm(gamma=0.5))
+                        fig.colorbar(p, label='freq (log scale)')
+                        ax.set_xlabel('target')
+                        ax.set_ylabel('pred')
+                        ax.set_title('Misclassification map')
+                        fig.savefig('test_hist_pairs.png')
+                        img = fig2rgb_array(fig, expand=False)
+                        logger.image_summary(f'{args.tag}/train_hist_pairs', img, epoch, dataformats='HWC')
+                        plt.close(fig)
 
-                    fig = plot_results((distr['z_means'], distr['y_labels'], distr['i_successes']), tag=args.tag)
-                    img = fig2rgb_array(fig, expand=False)
-                    logger.image_summary(f'{args.tag}/train', img, prev_iter + i + 1, dataformats='HWC')
+                    if (i + 1) == display_step:
+                        distr['z_means'] = np.concatenate(distr['z_means'], axis=0)
+                        distr['y_labels'] = np.concatenate(distr['y_labels'], axis=0)
+                        distr['i_successes'] = np.concatenate(distr['i_successes'], axis=0)
+
+                        fig = plot_results((distr['z_means'], distr['y_labels'], distr['i_successes']), tag=args.tag)
+                        img = fig2rgb_array(fig, expand=False)
+                        logger.image_summary(f'{args.tag}/train', img, prev_iter + i + 1, dataformats='HWC')
+                        plt.close(fig)
 
                     log_step = log_step * 2
+
                 distr = {'z_means': [], 'y_labels': [], 'i_successes': []}
 
             del x, y, target
@@ -286,7 +311,7 @@ def train(model, opt, device,
                 del val_x, val_y, val_target
                 model.train()
 
-            if (epoch + 1) % args.save_step == 0 or (epoch+1) == epochs:
+            if (i + 1) == len(train_dataloader) and ((epoch + 1) % args.save_step == 0 or (epoch + 1) == epochs):
                 if not os.path.exists(args.ckpt_model_dir):
                     os.mkdir(args.ckpt_model_dir)
                 ckpt_model_filename = f'shallownet_{args.tag}_{epoch}epoch.ckpt'
