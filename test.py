@@ -136,7 +136,8 @@ def train(model, opt, device,
                         hist_pairs[r, c] = hist_pairs[r, c] + 1
             pred_eval = (torch.argmax(cl_eval, dim=1) == target).detach()
 
-            focal_kwargs = dict(gamma=(args.gamma * (-math.cos((max(epoch-3/5*epochs, 0))/20*(2*math.pi))+1)/2)) if args.focal_loss else {}
+            scaling_factor = (-math.cos((max(epoch-3/5*epochs, 0))/20*(2*math.pi))+1)/2
+            focal_kwargs = dict(gamma=(args.gamma * scaling_factor)) if args.focal_loss else {}
             # losses
             mse_loss = mse_fn(y, x)
             ce_loss = ce_fn(cl, target, **focal_kwargs)
