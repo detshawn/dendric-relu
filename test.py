@@ -56,6 +56,25 @@ def train(model, opt, device,
     kl_fn = KLLoss
     guess_bce_fn = torch.nn.BCELoss()
 
+    gamma_scaling_fn = None
+    if args.focal_loss:
+        def build_gamma_scaling_fn(function):
+            def scaling_sigmoid(x, offset, width_factor=20):
+                return sigmoid((x-offset) / 8 * width_factor)
+
+            def scaling_cos(x, offset, pre_offset=False, T=20):
+                x_tilde = x - offset
+                if not pre_offset:
+                    x_tilde = max(x_tilde, 0)
+                return (-math.cos(x_tilde / T*(2*math.pi)) + 1) / 2
+
+            if function == 'sigmoid':
+                return scaling_sigmoid
+            elif function == 'cos':
+                return scaling_cos
+
+        gamma_scaling_fn = build_gamma_scaling_fn(args.gamma_scaling_function)
+
     losses = {'iter': [],
               'loss': [], 'mse_loss': [], 'ce_loss': [], 'kl_loss': [],
               'guess_bce_loss': [],
@@ -112,6 +131,8 @@ def train(model, opt, device,
                     print(f'train_dataloader (for measurement): {len(train_dataloader)}')
                     extended_indices = []
 
+        scaling_factor = gamma_scaling_fn(epoch, 3/5*epochs-1)
+
         model.train()
         for i, data in enumerate(iter(train_dataloader)):
             opt.zero_grad()
@@ -136,7 +157,6 @@ def train(model, opt, device,
                         hist_pairs[r, c] = hist_pairs[r, c] + 1
             pred_eval = (torch.argmax(cl_eval, dim=1) == target).detach()
 
-            scaling_factor = (-math.cos((max(epoch-3/5*epochs, 0))/20*(2*math.pi))+1)/2
             focal_kwargs = dict(gamma=(args.gamma * scaling_factor)) if args.focal_loss else {}
             # losses
             mse_loss = mse_fn(y, x)
@@ -493,6 +513,7 @@ if __name__ == "__main__":
 
     parser.add_argument('--focal-loss', action='store_true')
     parser.add_argument('-gamma', default=2, type=float)
+    parser.add_argument('-gamma-scaling-function', default='sigmoid')
 
     parser.add_argument('--ge2e-loss', action='store_true')
     parser.add_argument('-ge2e-step', default=16, type=float)
