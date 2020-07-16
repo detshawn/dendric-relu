@@ -86,6 +86,8 @@ def train(model, opt, device,
         hist_pairs = np.zeros((10, 10))
 
         guess = (epoch+1) > args.guess_trigger_epoch
+        ge2e = (epoch+1) > args.ge2e_trigger_epoch
+
         if guess:
             if extended_clock == 0:
                 print(f'extended_clock: {extended_clock}, extended_indices: {len(extended_indices)}')
@@ -134,7 +136,7 @@ def train(model, opt, device,
                         hist_pairs[r, c] = hist_pairs[r, c] + 1
             pred_eval = (torch.argmax(cl_eval, dim=1) == target).detach()
 
-            focal_kwargs = dict(gamma=(args.gamma * (math.sin((max(epoch-3/5*epochs, 0))/20*(2*math.pi))+1)/2)) if args.focal_loss else {}
+            focal_kwargs = dict(gamma=(args.gamma * (-math.cos((max(epoch-3/5*epochs, 0))/20*(2*math.pi))+1)/2)) if args.focal_loss else {}
             # losses
             mse_loss = mse_fn(y, x)
             ce_loss = ce_fn(cl, target, **focal_kwargs)
@@ -146,10 +148,11 @@ def train(model, opt, device,
             meta['loss']['kl'] = kl_loss.item()
             meta['loss']['total'] = loss.item()
 
-            if args.ge2e_loss:
+            if args.ge2e_loss and ge2e:
                 for emb, t in zip(z_mean, target):
                     embeds_for_ge2e[t].append(emb)
                 if (i+1) % args.ge2e_step == 0:
+                    ge2e_loss = None
                     n_min_samples = 12
                     embeds_for_ge2e_input = [torch.stack(e, dim=0).clone() for e in embeds_for_ge2e if len(e) >= n_min_samples]
                     if len(embeds_for_ge2e_input) > 2:
@@ -210,7 +213,7 @@ def train(model, opt, device,
                     meta['acc']['guess_acc'] = (pred_cnt["guess_true_pos"]+pred_cnt["guess_true_neg"]) / pred_cnt["total"]
                     guess_acc = meta['acc']['guess_acc']
                     acc_print += f' \t               \tguess_acc={guess_acc:.2f}'
-                if args.ge2e_loss:
+                if args.ge2e_loss and ge2e and ge2e_loss is not None:
                     loss_print += f'\tge2e_loss={ge2e_loss:.5f}'
 
                 print(loss_print)
@@ -259,6 +262,8 @@ def train(model, opt, device,
 
             del x, y, target
             del loss, mse_loss, ce_loss, kl_loss
+            if guess:
+                del guess_bce_loss
 
             if (i + 1) % eval_step == 0 or (i+1) == len(train_dataloader):
                 model.eval()
@@ -490,6 +495,7 @@ if __name__ == "__main__":
 
     parser.add_argument('--ge2e-loss', action='store_true')
     parser.add_argument('-ge2e-step', default=16, type=float)
+    parser.add_argument('-ge2e-trigger-epoch', type=int)
 
     parser.add_argument('-ckpt-model-dir', default='./ckpts/')
     parser.add_argument('--load-model', action='store_true')
@@ -497,7 +503,14 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    if not args.guess_trigger_epoch:
+    if args.guess_trigger_epoch is None:
         args.guess_trigger_epoch = args.epochs
 
+    if args.ge2e_loss:
+        if args.ge2e_trigger_epoch is None:
+            args.ge2e_trigger_epoch = int(args.epochs * 2/3)
+    else:
+        args.ge2e_trigger_epoch = args.epochs
+
+    print(f'args: {args}')
     main()
