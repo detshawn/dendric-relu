@@ -23,7 +23,10 @@ def build_focal_loss(_gamma):
             weight = w_i[target_i]
             loss.append(-weight * log_p_i[target_i])
             mean_factor.append(weight)
-        loss = torch.stack(loss, dim=0).sum() / torch.stack(mean_factor, dim=0).sum()
+        loss = torch.stack(loss, dim=0).sum()
+        mean_factor = torch.stack(mean_factor, dim=0).sum()
+        if mean_factor > 0:
+            loss = loss / mean_factor
         return loss
     return focal_loss_fn
 

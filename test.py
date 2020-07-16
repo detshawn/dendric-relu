@@ -60,7 +60,7 @@ def train(model, opt, device,
     if args.focal_loss:
         def build_gamma_scaling_fn(function):
             def scaling_sigmoid(x, offset, width_factor=20):
-                return sigmoid((x-offset) / 8 * width_factor)
+                return sigmoid((x-offset) * 4 / width_factor)
 
             def scaling_cos(x, offset, pre_offset=False, T=20):
                 x_tilde = x - offset
@@ -132,6 +132,8 @@ def train(model, opt, device,
                     extended_indices = []
 
         scaling_factor = gamma_scaling_fn(epoch, 3/5*epochs-1)
+        focal_kwargs = dict(gamma=(args.gamma * scaling_factor)) if args.focal_loss else {}
+        print(f'scaling_factor: {scaling_factor}, focal_kwargs: {focal_kwargs}')
 
         model.train()
         for i, data in enumerate(iter(train_dataloader)):
@@ -157,7 +159,6 @@ def train(model, opt, device,
                         hist_pairs[r, c] = hist_pairs[r, c] + 1
             pred_eval = (torch.argmax(cl_eval, dim=1) == target).detach()
 
-            focal_kwargs = dict(gamma=(args.gamma * scaling_factor)) if args.focal_loss else {}
             # losses
             mse_loss = mse_fn(y, x)
             ce_loss = ce_fn(cl, target, **focal_kwargs)
