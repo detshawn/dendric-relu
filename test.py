@@ -93,7 +93,7 @@ def train(model, opt, device,
     for epoch in range(init_epoch, epochs):
         print(f':: {epoch}-th epoch >>>')
 
-        embeds_for_ge2e = [[] for i in range(10)]
+        embeds_for_ge2e = [[] for _ in range(10)]
 
         pred_cnt = {'total': 0, 'true': 0,
                     'guess_true_pos': 0, 'guess_true_neg': 0,
@@ -131,9 +131,12 @@ def train(model, opt, device,
                     print(f'train_dataloader (for measurement): {len(train_dataloader)}')
                     extended_indices = []
 
-        scaling_factor = gamma_scaling_fn(epoch, 3/5*epochs-1)
-        focal_kwargs = dict(gamma=(args.gamma * scaling_factor)) if args.focal_loss else {}
-        print(f'scaling_factor: {scaling_factor}, focal_kwargs: {focal_kwargs}')
+        focal_kwargs = {}
+        if args.focal_loss:
+            scaling_factor = gamma_scaling_fn(epoch, 3/5*epochs-1)
+            focal_kwargs = dict(gamma=(args.gamma * scaling_factor))
+            print(f'scaling_factor: {scaling_factor}')
+        print(f'focal_kwargs: {focal_kwargs}')
 
         model.train()
         for i, data in enumerate(iter(train_dataloader)):

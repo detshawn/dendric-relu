@@ -16,7 +16,7 @@ def build_focal_loss(_gamma):
 
     def focal_loss_fn(x, target, gamma=_gamma):
         log_p = logsoftmax(x)
-        weights = (1-torch.exp(log_p)).pow(gamma)
+        weights = (1-torch.exp(log_p.clone().detach())).pow(gamma)
         loss = []
         mean_factor = []
         for log_p_i, target_i, w_i in zip(log_p, target, weights):
