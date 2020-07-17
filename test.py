@@ -281,7 +281,8 @@ def train(model, opt, device,
                         img = fig2rgb_array(fig, expand=False)
                         logger.image_summary(f'{args.tag}/train_hist_pairs', img, epoch, dataformats='HWC')
                         plt.close(fig)
-                        log_step = log_step * 2
+                        if log_step < 32:
+                            log_step = log_step * 2
 
                 distr = {'z_means': [], 'y_labels': [], 'i_successes': []}
 
