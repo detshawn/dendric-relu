@@ -255,7 +255,7 @@ class ShallowNet(nn.Module):
         enc_kwargs = enc_kwargs or {}
         out = x
         z_sample, enc_intermediates = self.encoder(out, dropout=dropout, **enc_kwargs)
-        cl = self.classifier(z_sample, dropout=dropout)
+        cl = self.classifier(enc_intermediates['z_mean'], dropout=dropout)
         out = self.decoder(z_sample, dropout=dropout)
         return out, (cl, z_sample, enc_intermediates)
 
