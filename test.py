@@ -215,27 +215,11 @@ def train(model, opt, device,
             if guess:
                 guess_out = enc_intermediates['guess_out']
                 guess_bce_loss = guess_bce_fn(guess_out.double(), pred.double())
-                guess_pred = ((guess_out >= .5) == pred.view(-1, 1)).detach()
+                # guess_pred = ((guess_out >= .5) == pred.view(-1, 1)).detach()
                 meta['loss']['guess_bce'] = guess_bce_loss.item()
 
                 loss = loss + guess_bce_loss
                 meta['loss']['total'] = meta['loss']['total'] + meta['loss']['guess_bce']
-
-            # predict classification
-            pred = pred.cpu().numpy()
-            if guess:
-                guess_pred = guess_pred.cpu().numpy()
-                pred_cnt['guess_true_pos'] = pred_cnt['guess_true_pos'] + guess_pred[pred == 1].sum()
-                pred_cnt['guess_true_neg'] = pred_cnt['guess_true_neg'] + (guess_pred[pred == 0] == 0).sum()
-                pred_cnt['guess_false_pos'] = pred_cnt['guess_false_pos'] + (guess_pred[pred == 0] == 1).sum()
-                pred_cnt['guess_false_neg'] = pred_cnt['guess_false_neg'] + (guess_pred[pred == 1] == 0).sum()
-                if extended_clock == 0:
-                    passed = (guess_pred == 0) * (pred.reshape(-1, 1) == 0)
-                    extended_indices.extend([idx.item() for i, idx in enumerate(x_idx) if passed[i]])
-
-            distr['z_means'].append(z_mean.clone().detach().cpu().numpy())
-            distr['y_labels'].append(target.clone().detach().cpu().numpy())
-            distr['i_successes'].append(pred)
 
             # backward
             loss.backward()
@@ -247,13 +231,35 @@ def train(model, opt, device,
             model.eval()
             with torch.no_grad():
                 _, (cl_eval, _, enc_intermediates_eval) = model(x, dropout=False, enc_kwargs=enc_kwargs_eval)
+                z_mean_eval = enc_intermediates_eval['z_mean']
+
                 if (epoch + 1) % log_step == 0 or (epoch + 1) == epochs:
                     for r, c in zip(torch.argmax(cl_eval, dim=1), target):
                         if r != c:
                             hist_pairs[r, c] = hist_pairs[r, c] + 1
+
                 pred_eval = (torch.argmax(cl_eval, dim=1) == target).detach()
+                if guess:
+                    guess_out_eval = enc_intermediates_eval['guess_out']
+                    guess_pred_eval = ((guess_out_eval >= .5) == pred_eval.view(-1, 1)).detach()
+
                 pred_eval = pred_eval.cpu().numpy()
                 pred_eval_sum = pred_eval.sum()
+
+                # predict classification
+                if guess:
+                    guess_pred_eval = guess_pred_eval.cpu().numpy()
+                    pred_cnt['guess_true_pos'] = pred_cnt['guess_true_pos'] + guess_pred_eval[pred_eval == 1].sum()
+                    pred_cnt['guess_true_neg'] = pred_cnt['guess_true_neg'] + (guess_pred_eval[pred_eval == 0] == 0).sum()
+                    pred_cnt['guess_false_pos'] = pred_cnt['guess_false_pos'] + (guess_pred_eval[pred_eval == 0] == 1).sum()
+                    pred_cnt['guess_false_neg'] = pred_cnt['guess_false_neg'] + (guess_pred_eval[pred_eval == 1] == 0).sum()
+                    if extended_clock == 0:
+                        passed = (guess_pred_eval == 0) * (pred_eval.reshape(-1, 1) == 0)
+                        extended_indices.extend([idx.item() for i, idx in enumerate(x_idx) if passed[i]])
+
+                distr['z_means'].append(z_mean_eval.clone().detach().cpu().numpy())
+                distr['y_labels'].append(target.clone().detach().cpu().numpy())
+                distr['i_successes'].append(pred_eval)
 
                 pred_cnt['total'] = pred_cnt['total'] + x.size()[0]
                 pred_cnt['true'] = pred_cnt['true'] + pred_eval_sum
