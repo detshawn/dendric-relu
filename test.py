@@ -106,6 +106,7 @@ def train(model, opt, device,
 
         guess = (epoch+1) > args.guess_trigger_epoch and args.guess
         ge2e = (epoch+1) > args.ge2e_trigger_epoch and args.ge2e_loss
+        partial_training = None
 
         if guess and args.partial_training:
             if extended_clock == 0:
@@ -124,6 +125,8 @@ def train(model, opt, device,
                     for p in model.encoder.bns.parameters():
                         p.requires_grad = True
 
+                    partial_training = True
+
                 else:
                     print(f'train_dataloader <- orig_train_dataloader {len(train_dataloader)}')
                     train_dataloader = orig_train_dataloader
@@ -131,6 +134,8 @@ def train(model, opt, device,
                     conditional_batch_norm = False
                     for p in model.parameters():
                         p.requires_grad = True
+
+                    partial_training = False
 
             else:
                 extended_clock = max(extended_clock - 1, 0)
@@ -143,8 +148,11 @@ def train(model, opt, device,
                     for p in model.parameters():
                         p.requires_grad = True
 
+                    partial_training = False
+
                 else:
                     conditional_batch_norm = args.conditional_batch_norm
+                    partial_training = True
         else:
             conditional_batch_norm = False
 
@@ -252,10 +260,15 @@ def train(model, opt, device,
             model.train()
 
             if (i+1) % display_step == 0 or (i+1) == len(train_dataloader):
-                meta['acc']['acc'] = pred_cnt["true"] / pred_cnt["total"]
-                accuracy = meta['acc']['acc']
                 loss_print = f'>\t {i+1}-th iter:\tloss={loss:.2f},\tmse_loss={mse_loss:.3f},\tce_loss={ce_loss:.2f}\tkl_loss={kl_loss:.5f}'
-                acc_print = f' \t               \taccuracy={accuracy:.2f}'
+                if partial_training:
+                    meta['acc']['partial_acc'] = pred_cnt["true"] / pred_cnt["total"]
+                    accuracy = meta['acc']['partial_acc']
+                    acc_print = f' \t               \tpartial_acc={accuracy:.2f}'
+                else:
+                    meta['acc']['acc'] = pred_cnt["true"] / pred_cnt["total"]
+                    accuracy = meta['acc']['acc']
+                    acc_print = f' \t               \taccuracy={accuracy:.2f}'
                 if guess:
                     loss_print += f'\tguess_bce_loss={guess_bce_loss:.5f}'
                     meta['acc']['guess_acc'] = (pred_cnt["guess_true_pos"]+pred_cnt["guess_true_neg"]) / pred_cnt["total"]
@@ -363,10 +376,15 @@ def train(model, opt, device,
                         val_pred_cnt['guess_true_neg'] = val_pred_cnt['guess_true_neg'] + (val_guess_pred[val_pred == 0] == 0).sum()
 
                     if (i + 1) % display_step == 0 or (i + 1) == len(train_dataloader):
-                        val_meta['acc']['val_acc'] = val_pred_cnt["true"] / val_pred_cnt["total"]
-                        val_accuracy = val_meta['acc']['val_acc']
                         val_loss_print = f'>\t {i+1}-th iter:\t\t\t\t\t\tval_loss={val_loss:.2f},\tval_mse_loss={val_mse_loss:.3f},\tval_ce_loss={val_ce_loss:.2f}\tval_kl_loss={val_kl_loss:.5f}'
-                        val_acc_print = f' \t               \t\t\t\t\t\tval_accuracy={val_accuracy:.2f}'
+                        if partial_training:
+                            val_meta['acc']['val_partial_acc'] = val_pred_cnt["true"] / val_pred_cnt["total"]
+                            val_accuracy = val_meta['acc']['val_partial_acc']
+                            val_acc_print = f' \t               \t\t\t\t\t\tval_partial_acc={val_accuracy:.2f}'
+                        else:
+                            val_meta['acc']['val_acc'] = val_pred_cnt["true"] / val_pred_cnt["total"]
+                            val_accuracy = val_meta['acc']['val_acc']
+                            val_acc_print = f' \t               \t\t\t\t\t\tval_accuracy={val_accuracy:.2f}'
                         if guess:
                             val_loss_print += f'\tval_guess_bce_loss={val_guess_bce_loss:.5f}'
                             val_meta['acc']['val_guess_acc'] = (val_pred_cnt["guess_true_pos"] + val_pred_cnt["guess_true_neg"]) / val_pred_cnt["total"]
