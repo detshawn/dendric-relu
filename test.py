@@ -119,11 +119,18 @@ def train(model, opt, device,
                     print(f'train_dataloader (for sampling): {len(train_dataloader)}')
                     extended_clock = args.extended_clock_timer
                     conditional_batch_norm = args.conditional_batch_norm
+                    for p in model.parameters():
+                        p.requires_grad = False
+                    for p in model.encoder.bns.parameters():
+                        p.requires_grad = True
+
                 else:
                     print(f'train_dataloader <- orig_train_dataloader {len(train_dataloader)}')
                     train_dataloader = orig_train_dataloader
                     extended_clock = 5
                     conditional_batch_norm = False
+                    for p in model.parameters():
+                        p.requires_grad = True
 
             else:
                 extended_clock = max(extended_clock - 1, 0)
@@ -133,6 +140,9 @@ def train(model, opt, device,
                     print(f'train_dataloader (for measurement): {len(train_dataloader)}')
                     extended_indices = []
                     conditional_batch_norm = False
+                    for p in model.parameters():
+                        p.requires_grad = True
+
                 else:
                     conditional_batch_norm = args.conditional_batch_norm
         else:
