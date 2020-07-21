@@ -172,15 +172,8 @@ def train(model, opt, device,
 
             z_mean = enc_intermediates['z_mean']
             z_log_var = enc_intermediates['z_log_var']
-            pred = (torch.argmax(cl, dim=1) == target).detach()
             # predict classification
-            enc_kwargs_eval = dict(guess=guess, conditional=args.conditional_batch_norm)
-            _, (cl_eval, _, enc_intermediates_eval) = model(x, dropout=False, enc_kwargs=enc_kwargs_eval)
-            if (epoch + 1) % log_step == 0 or (epoch + 1) == epochs:
-                for r, c in zip(torch.argmax(cl_eval, dim=1), target):
-                    if r != c:
-                        hist_pairs[r, c] = hist_pairs[r, c] + 1
-            pred_eval = (torch.argmax(cl_eval, dim=1) == target).detach()
+            pred = (torch.argmax(cl, dim=1) == target).detach()
 
             # losses
             mse_loss = mse_fn(y, x)
@@ -213,10 +206,8 @@ def train(model, opt, device,
 
             if guess:
                 guess_out = enc_intermediates['guess_out']
-                guess_out_eval = enc_intermediates_eval['guess_out']
                 guess_bce_loss = guess_bce_fn(guess_out.double(), pred.double())
                 guess_pred = ((guess_out >= .5) == pred.view(-1, 1)).detach()
-                guess_pred_eval = ((guess_out_eval >= .5) == pred.view(-1, 1)).detach()
                 meta['loss']['guess_bce'] = guess_bce_loss.item()
 
                 loss = loss + guess_bce_loss
@@ -224,11 +215,6 @@ def train(model, opt, device,
 
             # predict classification
             pred = pred.cpu().numpy()
-            pred_eval = pred_eval.cpu().numpy()
-            pred_eval_sum = pred_eval.sum()
-
-            pred_cnt['total'] = pred_cnt['total'] + x.size()[0]
-            pred_cnt['true'] = pred_cnt['true'] + pred_eval_sum
             if guess:
                 guess_pred = guess_pred.cpu().numpy()
                 pred_cnt['guess_true_pos'] = pred_cnt['guess_true_pos'] + guess_pred[pred == 1].sum()
@@ -247,6 +233,23 @@ def train(model, opt, device,
             loss.backward()
             # update
             opt.step()
+
+            # eval
+            enc_kwargs_eval = dict(guess=guess, conditional=args.conditional_batch_norm)
+            model.eval()
+            with torch.no_grad():
+                _, (cl_eval, _, enc_intermediates_eval) = model(x, dropout=False, enc_kwargs=enc_kwargs_eval)
+                if (epoch + 1) % log_step == 0 or (epoch + 1) == epochs:
+                    for r, c in zip(torch.argmax(cl_eval, dim=1), target):
+                        if r != c:
+                            hist_pairs[r, c] = hist_pairs[r, c] + 1
+                pred_eval = (torch.argmax(cl_eval, dim=1) == target).detach()
+                pred_eval = pred_eval.cpu().numpy()
+                pred_eval_sum = pred_eval.sum()
+
+                pred_cnt['total'] = pred_cnt['total'] + x.size()[0]
+                pred_cnt['true'] = pred_cnt['true'] + pred_eval_sum
+            model.train()
 
             if (i+1) % display_step == 0 or (i+1) == len(train_dataloader):
                 meta['acc']['acc'] = pred_cnt["true"] / pred_cnt["total"]
