@@ -324,7 +324,7 @@ def train(model, opt, device,
                 val_x = val_x.to(device)
                 val_target = val_target.to(device)
                 with torch.no_grad():
-                    val_enc_kwargs = dict(guess=guess)
+                    val_enc_kwargs = dict(guess=guess, conditional=args.conditional_batch_norm)
                     val_y, (val_cl, val_z_sample, val_enc_intermediates) = model(val_x, enc_kwargs=val_enc_kwargs)
                     val_z_mean = val_enc_intermediates['z_mean']
                     val_z_log_var = val_enc_intermediates['z_log_var']
