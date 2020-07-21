@@ -1,6 +1,6 @@
 from torch import nn
 import torch
-from .activations import DendricLinear
+from .activations import DendricLinear, CondBatchNorm1d
 
 import numpy as np
 from sklearn.metrics import roc_curve
@@ -9,12 +9,19 @@ from scipy.interpolate import interp1d
 
 
 class Encoder(nn.Module):
-    def __init__(self, config, dropout=True, dendric=False, multi_position=1):
+    def __init__(self, config,
+                 dropout=True, dendric=False, multi_position=1,
+                 is_extended_layers=False, conditional_batch_norm=True):
         super(Encoder, self).__init__()
         layer_config = config['layers']
+        self.is_extended_layers = is_extended_layers
+        self.conditional_batch_norm = conditional_batch_norm
+        conditional_batch_norm_kwargs = dict(layers=[layer_config[-1], 4, 4]) if conditional_batch_norm else {}
+
         self.is_guess_net = ('guess_net' in config)
 
         layers = []
+        bns = []
         self.dendric = dendric
         for i in range(0, len(layer_config)-2):
             layer = nn.Sequential()
@@ -24,12 +31,16 @@ class Encoder(nn.Module):
                                                         hypers=hypers, hypos=hypos, multi_position=multi_position))
             else:
                 layer.add_module(f'l{i}', nn.Linear(in_features=layer_config[i], out_features=layer_config[i+1]))
-            layer.add_module(f'bn{i}', nn.BatchNorm1d(num_features=layer_config[i+1]))
+            bn = CondBatchNorm1d(num_features=layer_config[i+1],
+                                 conditional=conditional_batch_norm,
+                                 conditional_kwargs=conditional_batch_norm_kwargs)
             layers.append(layer)
+            bns.append(bn)
         two_layers = [nn.Linear(in_features=layer_config[-2], out_features=layer_config[-1]),
                       nn.Linear(in_features=layer_config[-2], out_features=layer_config[-1])]
         layers.append(nn.ModuleList(two_layers))
         self.layers = nn.ModuleList(layers)
+        self.bns = nn.ModuleList(bns)
 
         if self.is_guess_net:
             guess_net_config = config['guess_net']
@@ -50,24 +61,25 @@ class Encoder(nn.Module):
             self.guess_nets = nn.ModuleList(guess_nets)
             self.guesser = nn.Linear(in_features=guess_concat_length, out_features=1)
 
-            ext_layer_config = config['ext_layers']
-            ext_layers = []
-            self.dendric = dendric
-            for i in range(0, len(layer_config)-2):
-                in_features = ext_layer_config[i] + (layer_config[i] if i == 1 else 0)
-                layer = nn.Sequential()
-                if self.dendric and i != 0:
-                    hypers, hypos = [pow(2, 3-i)] * pow(2, 4-i), [pow(2, 3-i)] * pow(2, 4-i)
-                    layer.add_module(f'dl{i}', DendricLinear(in_features=in_features, out_features=ext_layer_config[i+1],
-                                                            hypers=hypers, hypos=hypos, multi_position=multi_position))
-                else:
-                    layer.add_module(f'l{i}', nn.Linear(in_features=in_features, out_features=ext_layer_config[i+1]))
-                layer.add_module(f'bn{i}', nn.BatchNorm1d(num_features=ext_layer_config[i+1]))
-                ext_layers.append(layer)
-            two_layers = [nn.Linear(in_features=layer_config[-2]+ext_layer_config[-2], out_features=layer_config[-1]),
-                          nn.Linear(in_features=layer_config[-2]+ext_layer_config[-2], out_features=layer_config[-1])]
-            ext_layers.append(nn.ModuleList(two_layers))
-            self.ext_layers = nn.ModuleList(ext_layers)
+            if self.is_extended_layers:
+                ext_layer_config = config['ext_layers']
+                ext_layers = []
+                self.dendric = dendric
+                for i in range(0, len(layer_config)-2):
+                    in_features = ext_layer_config[i] + (layer_config[i] if i == 1 else 0)
+                    layer = nn.Sequential()
+                    if self.dendric and i != 0:
+                        hypers, hypos = [pow(2, 3-i)] * pow(2, 4-i), [pow(2, 3-i)] * pow(2, 4-i)
+                        layer.add_module(f'dl{i}', DendricLinear(in_features=in_features, out_features=ext_layer_config[i+1],
+                                                                 hypers=hypers, hypos=hypos, multi_position=multi_position))
+                    else:
+                        layer.add_module(f'l{i}', nn.Linear(in_features=in_features, out_features=ext_layer_config[i+1]))
+                    layer.add_module(f'bn{i}', nn.BatchNorm1d(num_features=ext_layer_config[i+1]))
+                    ext_layers.append(layer)
+                two_layers = [nn.Linear(in_features=layer_config[-2]+ext_layer_config[-2], out_features=layer_config[-1]),
+                              nn.Linear(in_features=layer_config[-2]+ext_layer_config[-2], out_features=layer_config[-1])]
+                ext_layers.append(nn.ModuleList(two_layers))
+                self.ext_layers = nn.ModuleList(ext_layers)
 
         self.do = nn.Dropout(p=0.15) if dropout else None
         self.relu = nn.ReLU()
@@ -87,12 +99,13 @@ class Encoder(nn.Module):
         epsilon = torch.randn_like(z_mean)
         return z_mean + torch.exp(0.5*z_log_var) * epsilon
 
-    def forward(self, x, dropout=True, guess=False, ext_training=False):
+    def forward(self, x, dropout=True, guess=False, conditional=False, ext_training=False):
         out = x
         outs = []
         guess_in = []
-        for i, l in enumerate(self.layers[:-1]):
+        for i, (l, bn) in enumerate(zip(self.layers[:-1], self.bns)):
             out = l(out)
+            out = bn(out)
             if self.do is not None and dropout:
                 out = self.do(out)
             out = self.relu(out)
@@ -109,35 +122,72 @@ class Encoder(nn.Module):
             guess_out = self.sigmoid(guess_out)
             intermediates['guess_out'] = guess_out
 
-            if ext_training:
-                out = x
-                for i, l in enumerate(self.ext_layers[:-1]):
-                    out = torch.cat((outs[i-1], out), dim=1) if i == 1 else out
-                    out = l(out)
-                    if self.do is not None and dropout:
-                        out = self.do(out)
-                    out = self.relu(out)
+            if self.is_extended_layers:
+                if ext_training:
+                    out = x
+                    for i, l in enumerate(self.ext_layers[:-1]):
+                        out = torch.cat((outs[i-1], out), dim=1) if i == 1 else out
+                        out = l(out)
+                        if self.do is not None and dropout:
+                            out = self.do(out)
+                        out = self.relu(out)
 
-                out = torch.cat((outs[-1], out), dim=1)
-                z_mean = self.ext_layers[-1][0](out)
-                z_log_var = self.ext_layers[-1][1](out)
-            else:
-                guessed_mask = guess_out < .5
-                out = out * (~guessed_mask).view(out.size()[0], -1).repeat((1, out.size()[1]))
+                    out = torch.cat((outs[-1], out), dim=1)
+                    z_mean = self.ext_layers[-1][0](out)
+                    z_log_var = self.ext_layers[-1][1](out)
+                else:
+                    guessed_mask = (guess_out < .5).clone().detach()
+
+                    # passed samples
+                    guess_pass = (~guessed_mask).view(out.size()[0], -1)
+                    out = out * guess_pass.repeat((1, out.size()[1]))
+                    z_mean = self.layers[-1][0](out)
+                    z_log_var = self.layers[-1][1](out)
+                    rep = z_mean.size()[1]
+                    z_mean = z_mean * guess_pass.repeat((1, rep))
+                    z_log_var = z_log_var * guess_pass.repeat((1, rep))
+
+                    # failed samples
+                    guess_fail = guessed_mask.view(x.size()[0], -1)
+                    out = x * guess_fail.repeat((1, x.size()[1]))
+                    for i, l in enumerate(self.ext_layers[:-1]):
+                        out = torch.cat((outs[i - 1], out), dim=1) if i == 1 else out
+                        out = l(out)
+                        if self.do is not None and dropout:
+                            out = self.do(out)
+                        out = self.relu(out)
+
+                    out = torch.cat((outs[-1], out), dim=1)
+                    z_mean = z_mean + self.ext_layers[-1][0](out) * guess_fail.repeat((1, rep))
+                    z_log_var = z_log_var + self.ext_layers[-1][1](out) * guess_fail.repeat((1, rep))
+
+            elif self.conditional_batch_norm and conditional:
                 z_mean = self.layers[-1][0](out)
                 z_log_var = self.layers[-1][1](out)
+                rep = z_mean.size()[1]
 
-                out = x * guessed_mask.view(x.size()[0], -1).repeat((1, x.size()[1]))
-                for i, l in enumerate(self.ext_layers[:-1]):
-                    out = torch.cat((outs[i - 1], out), dim=1) if i == 1 else out
+                guessed_mask = (guess_out < .5).clone().detach()
+                guess_pass = (~guessed_mask).view(out.size()[0], -1)
+
+                # failed samples
+                guess_fail = guessed_mask.view(x.size()[0], -1)
+                out = x * guess_fail.repeat((1, x.size()[1]))
+                conditional_input = (z_mean * guess_fail.repeat((1, rep))).clone().detach()
+                for i, (l, bn) in enumerate(zip(self.layers[:-1], self.bns)):
                     out = l(out)
+                    kwargs = dict(conditional_input=conditional_input)
+                    out = bn(out, **kwargs)
                     if self.do is not None and dropout:
                         out = self.do(out)
                     out = self.relu(out)
 
-                out = torch.cat((outs[-1], out), dim=1)
-                z_mean = z_mean + self.ext_layers[-1][0](out)
-                z_log_var = z_log_var + self.ext_layers[-1][1](out)
+                z_mean = z_mean * guess_pass.repeat((1, rep)) +\
+                         self.layers[-1][0](out) * guess_fail.repeat((1, rep))
+                z_log_var = z_log_var * guess_pass.repeat((1, rep)) +\
+                            self.layers[-1][1](out) * guess_fail.repeat((1, rep))
+            else:
+                z_mean = self.layers[-1][0](out)
+                z_log_var = self.layers[-1][1](out)
 
         else:
             z_mean = self.layers[-1][0](out)
@@ -224,7 +274,8 @@ class Classifier(nn.Module):
 
 
 class ShallowNet(nn.Module):
-    def __init__(self, in_features, out_features, device, n_hiddens=2, config=None, sub_kwargs=None):
+    def __init__(self, in_features, out_features, device, n_hiddens=2,
+                 config=None, sub_kwargs=None, enc_kwargs=None):
         super(ShallowNet, self).__init__()
         self.config = config
         self.device = device
@@ -241,7 +292,8 @@ class ShallowNet(nn.Module):
             self.layer_config['Decoder']['layers'] = encoder_config[-1::-1]
 
         sub_kwargs = sub_kwargs or {}
-        self.encoder = Encoder(self.config['Encoder'], **sub_kwargs)
+        enc_kwargs = enc_kwargs or {}
+        self.encoder = Encoder(self.config['Encoder'], **sub_kwargs, **enc_kwargs)
         self.classifier = Classifier(self.config['Classifier'], **sub_kwargs)
         self.decoder = Decoder(self.config['Decoder'], **sub_kwargs)
 

@@ -1,4 +1,4 @@
-pytouch
+torch
 torchvision
 tensorboard
 tensorboardX

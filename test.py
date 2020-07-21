@@ -104,10 +104,10 @@ def train(model, opt, device,
 
         hist_pairs = np.zeros((10, 10))
 
-        guess = (epoch+1) > args.guess_trigger_epoch
-        ge2e = (epoch+1) > args.ge2e_trigger_epoch
+        guess = (epoch+1) > args.guess_trigger_epoch and args.guess
+        ge2e = (epoch+1) > args.ge2e_trigger_epoch and args.ge2e_loss
 
-        if guess:
+        if guess and args.partial_training:
             if extended_clock == 0:
                 print(f'extended_clock: {extended_clock}, extended_indices: {len(extended_indices)}')
                 if len(extended_indices) > 0:
@@ -118,10 +118,12 @@ def train(model, opt, device,
                                                   drop_last=True)
                     print(f'train_dataloader (for sampling): {len(train_dataloader)}')
                     extended_clock = args.extended_clock_timer
+                    conditional_batch_norm = args.conditional_batch_norm
                 else:
                     print(f'train_dataloader <- orig_train_dataloader {len(train_dataloader)}')
                     train_dataloader = orig_train_dataloader
                     extended_clock = 5
+                    conditional_batch_norm = False
 
             else:
                 extended_clock = max(extended_clock - 1, 0)
@@ -130,6 +132,11 @@ def train(model, opt, device,
                     train_dataloader = orig_train_dataloader
                     print(f'train_dataloader (for measurement): {len(train_dataloader)}')
                     extended_indices = []
+                    conditional_batch_norm = False
+                else:
+                    conditional_batch_norm = args.conditional_batch_norm
+        else:
+            conditional_batch_norm = False
 
         focal_kwargs = {}
         if args.focal_loss:
@@ -148,14 +155,17 @@ def train(model, opt, device,
             target = target.to(device)
 
             # forward
-            y, (cl, z_sample, enc_intermediates) = model(x,
-                                                         enc_kwargs=dict(guess=guess, ext_training=(extended_clock > 0)))
+            enc_kwargs = dict(guess=guess, conditional=conditional_batch_norm)
+            if args.extended_layers:
+                enc_kwargs['ext_training'] = (extended_clock > 0)
+            y, (cl, z_sample, enc_intermediates) = model(x, enc_kwargs=enc_kwargs)
+
             z_mean = enc_intermediates['z_mean']
             z_log_var = enc_intermediates['z_log_var']
             pred = (torch.argmax(cl, dim=1) == target).detach()
             # predict classification
-            _, (cl_eval, _, enc_intermediates_eval) = model(x, dropout=False,
-                                                            enc_kwargs=dict(guess=guess))
+            enc_kwargs_eval = dict(guess=guess, conditional=args.conditional_batch_norm)
+            _, (cl_eval, _, enc_intermediates_eval) = model(x, dropout=False, enc_kwargs=enc_kwargs_eval)
             if (epoch + 1) % log_step == 0 or (epoch + 1) == epochs:
                 for r, c in zip(torch.argmax(cl_eval, dim=1), target):
                     if r != c:
@@ -173,11 +183,11 @@ def train(model, opt, device,
             meta['loss']['kl'] = kl_loss.item()
             meta['loss']['total'] = loss.item()
 
-            if args.ge2e_loss and ge2e:
+            ge2e_loss = None
+            if ge2e:
                 for emb, t in zip(z_mean, target):
                     embeds_for_ge2e[t].append(emb)
                 if (i+1) % args.ge2e_step == 0:
-                    ge2e_loss = None
                     n_min_samples = 12
                     embeds_for_ge2e_input = [torch.stack(e, dim=0).clone() for e in embeds_for_ge2e if len(e) >= n_min_samples]
                     if len(embeds_for_ge2e_input) > 2:
@@ -238,7 +248,7 @@ def train(model, opt, device,
                     meta['acc']['guess_acc'] = (pred_cnt["guess_true_pos"]+pred_cnt["guess_true_neg"]) / pred_cnt["total"]
                     guess_acc = meta['acc']['guess_acc']
                     acc_print += f' \t               \tguess_acc={guess_acc:.2f}'
-                if args.ge2e_loss and ge2e and ge2e_loss is not None:
+                if ge2e and ge2e_loss is not None:
                     loss_print += f'\tge2e_loss={ge2e_loss:.5f}'
 
                 print(loss_print)
@@ -304,7 +314,8 @@ def train(model, opt, device,
                 val_x = val_x.to(device)
                 val_target = val_target.to(device)
                 with torch.no_grad():
-                    val_y, (val_cl, val_z_sample, val_enc_intermediates) = model(val_x, enc_kwargs=dict(guess=guess))
+                    val_enc_kwargs = dict(guess=guess)
+                    val_y, (val_cl, val_z_sample, val_enc_intermediates) = model(val_x, enc_kwargs=val_enc_kwargs)
                     val_z_mean = val_enc_intermediates['z_mean']
                     val_z_log_var = val_enc_intermediates['z_log_var']
                     val_pred = (torch.argmax(val_cl, dim=1) == val_target).detach()
@@ -465,11 +476,14 @@ def test_MNIST():
         config = yaml.load(f)
     # print(f'config: {config}')
 
-    sub_kwargs = dict(dendric=args.dendric, multi_position=args.multi_position)
+    sub_kwargs = dict(dendric=args.dendric,
+                      multi_position=args.multi_position)
+    enc_kwargs = dict(is_extended_layers=args.extended_layers,
+                      conditional_batch_norm=args.conditional_batch_norm)
     in_features = train_dataset[0][1].shape[0]
     model = ShallowNet(in_features=in_features, out_features=8, device=device,
                        config=config['ShallowNet'],
-                       sub_kwargs=sub_kwargs)
+                       sub_kwargs=sub_kwargs, enc_kwargs=enc_kwargs)
     if args.load_model:
         if os.path.exists(args.load_model_path):
             ckpts = torch.load(args.load_model_path)
@@ -507,7 +521,6 @@ if __name__ == "__main__":
     parser.add_argument('-config', required=True)
     parser.add_argument('-batch-size', default=8, type=int)
     parser.add_argument('-epochs', default=64, type=int)
-    parser.add_argument('-guess-trigger-epoch', type=int)
     parser.add_argument('-extended-clock-timer', default=10, type=int)
     parser.add_argument('-tag', default='nonetag')
     parser.add_argument('--dendric', action='store_true')
@@ -524,13 +537,22 @@ if __name__ == "__main__":
     parser.add_argument('-ge2e-step', default=16, type=float)
     parser.add_argument('-ge2e-trigger-epoch', type=int)
 
+    parser.add_argument('--guess', action='store_true')
+    parser.add_argument('--partial-training', action='store_true')
+    parser.add_argument('--extended-layers', action='store_true')
+    parser.add_argument('--conditional-batch-norm', action='store_true')
+    parser.add_argument('-guess-trigger-epoch', type=int)
+
     parser.add_argument('-ckpt-model-dir', default='./ckpts/')
     parser.add_argument('--load-model', action='store_true')
     parser.add_argument('-load-model-path')
 
     args = parser.parse_args()
 
-    if args.guess_trigger_epoch is None:
+    if args.guess:
+        if args.guess_trigger_epoch is None:
+            args.guess_trigger_epoch = int(args.epochs * 2/3)
+    else:
         args.guess_trigger_epoch = args.epochs
 
     if args.ge2e_loss:
