@@ -4,7 +4,7 @@ from torch import nn
 
 class CondBatchNorm1d(nn.Module):
     def __init__(self, num_features, eps=1e-5, momentum=0.1, affine=True,
-                 conditional=True, conditional_kwargs=None,
+                 conditional=False, conditional_layers=None, conditional_type='second-momentum',
                  track_running_stats=True):
         super(CondBatchNorm1d, self).__init__()
         self.num_features = num_features
@@ -12,7 +12,7 @@ class CondBatchNorm1d(nn.Module):
         self.momentum = momentum
         self.affine = affine
         self.conditional = conditional
-        self.conditional_kwargs = conditional_kwargs or {}
+        self.conditional_type = conditional_type
         self.track_running_stats = track_running_stats
         if self.affine:
             self.weight = nn.Parameter(torch.Tensor(num_features))
@@ -21,10 +21,9 @@ class CondBatchNorm1d(nn.Module):
             self.register_parameter('weight', None)
             self.register_parameter('bias', None)
         if self.conditional:
-            layers = self.conditional_kwargs['layers']
             self.conditional_net = nn.Sequential()
-            for i, l in enumerate(layers[:-1]):
-                self.conditional_net.add_module(f'l{i}', nn.Linear(l, layers[i + 1]))
+            for i, l in enumerate(conditional_layers[:-1]):
+                self.conditional_net.add_module(f'l{i}', nn.Linear(l, conditional_layers[i + 1]))
                 self.conditional_net.add_module(f'relu{i}', nn.ReLU())
         else:
             self.register_parameter('conditional_net', None)
@@ -77,13 +76,24 @@ class CondBatchNorm1d(nn.Module):
 
         if self.conditional and conditional_input is not None:
             conditions = self.conditional_net(conditional_input).mean(dim=0, keepdim=False)
-            return torch.nn.functional.batch_norm(
-                input, self.running_mean, self.running_var,
-                conditions[0] * self.weight + conditions[1],
-                conditions[2] * self.bias + conditions[3],
-                self.training or not self.track_running_stats,
-                exponential_average_factor, self.eps)
+            if self.conditional_type == 'second-momentum':
+                return torch.nn.functional.batch_norm(
+                    input, self.running_mean, self.running_var,
+                    conditions[0] * self.weight + conditions[1],
+                    conditions[2] * self.bias + conditions[3],
+                    self.training or not self.track_running_stats,
+                    exponential_average_factor, self.eps)
 
+            elif self.conditional_type == 'element-wise':
+                half_size = int(conditions.size()[0]/2)
+                assert(half_size == self.weight.size()[0])
+                assert(half_size == self.bias.size()[0])
+                return torch.nn.functional.batch_norm(
+                    input, self.running_mean, self.running_var,
+                    conditions[:half_size] * self.weight,
+                    conditions[half_size:] * self.bias,
+                    self.training or not self.track_running_stats,
+                    exponential_average_factor, self.eps)
         else:
             return torch.nn.functional.batch_norm(
                 input, self.running_mean, self.running_var, self.weight, self.bias,
@@ -92,7 +102,7 @@ class CondBatchNorm1d(nn.Module):
 
     def extra_repr(self):
         return '{num_features}, eps={eps}, momentum={momentum}, affine={affine}, ' \
-               'conditional={conditional}, conditional_kwargs={conditional_kwargs}, ' \
+               'conditional={conditional}, conditional_type={conditional_type}, ' \
                'track_running_stats={track_running_stats}'.format(**self.__dict__)
 
 

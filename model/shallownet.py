@@ -16,8 +16,6 @@ class Encoder(nn.Module):
         layer_config = config['layers']
         self.is_extended_layers = is_extended_layers
         self.conditional_batch_norm = conditional_batch_norm
-        conditional_batch_norm_kwargs = dict(layers=[layer_config[-1], 4, 4]) if conditional_batch_norm else {}
-
         self.is_guess_net = ('guess_net' in config)
 
         layers = []
@@ -31,9 +29,23 @@ class Encoder(nn.Module):
                                                         hypers=hypers, hypos=hypos, multi_position=multi_position))
             else:
                 layer.add_module(f'l{i}', nn.Linear(in_features=layer_config[i], out_features=layer_config[i+1]))
+
+            if conditional_batch_norm:
+                if 'conditional' in config:
+                    conditional_type = config['conditional'][i]
+                else:
+                    conditional_type = 'second-momentum'
+                conditional_batch_norm_kwargs = dict(conditional=conditional_batch_norm,
+                                                     conditional_type=conditional_type)
+                if conditional_type == 'element-wise':
+                    conditional_batch_norm_kwargs['conditional_layers'] = [layer_config[-1], layer_config[-1], layer_config[i+1]*2]
+                else:
+                    conditional_batch_norm_kwargs['conditional_layers'] = [layer_config[-1], 4, 4]
+            else:
+                conditional_batch_norm_kwargs = {}
             bn = CondBatchNorm1d(num_features=layer_config[i+1],
-                                 conditional=conditional_batch_norm,
-                                 conditional_kwargs=conditional_batch_norm_kwargs)
+                                 **conditional_batch_norm_kwargs)
+
             layers.append(layer)
             bns.append(bn)
         two_layers = [nn.Linear(in_features=layer_config[-2], out_features=layer_config[-1]),
