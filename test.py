@@ -479,7 +479,7 @@ def test_MNIST():
     batch_size = args.batch_size if device is "cuda" else 4
 
     print('importing data ...')
-    mndata = MNIST('../mnist')
+    mndata = MNIST(args.mnist_data_path)
     train_images, train_labels = mndata.load_testing()
     # print(mndata.display(train_images[10]))
     train_dataset = MNISTDataset(np.array(train_images), np.array(train_labels))
@@ -591,6 +591,7 @@ if __name__ == "__main__":
     parser.add_argument('-ckpt-model-dir', default='./ckpts/')
     parser.add_argument('--load-model', action='store_true')
     parser.add_argument('-load-model-path')
+    parser.add_argument('-mnist-data-path', default='../mnist')
 
     args = parser.parse_args()
 
