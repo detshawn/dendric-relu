@@ -136,6 +136,8 @@ def train(model, opt, device,
                     conditional_batch_norm = False
                     for p in model.parameters():
                         p.requires_grad = True
+                    for p in model.encoder.bns.parameters():
+                        p.requires_grad = False
 
                     partial_training = False
 
@@ -155,6 +157,8 @@ def train(model, opt, device,
                     conditional_batch_norm = False
                     for p in model.parameters():
                         p.requires_grad = True
+                    for p in model.encoder.bns.parameters():
+                        p.requires_grad = False
 
                     partial_training = False
 
@@ -181,7 +185,7 @@ def train(model, opt, device,
             target = target.to(device)
 
             # forward
-            enc_kwargs = dict(guess=guess, conditional=conditional_batch_norm)
+            enc_kwargs = dict(guess=guess, conditional=args.conditional_batch_norm)
             if args.extended_layers:
                 enc_kwargs['ext_training'] = (extended_clock > 0)
             y, (cl, z_sample, enc_intermediates) = model(x, enc_kwargs=enc_kwargs)
