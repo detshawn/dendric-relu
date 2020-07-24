@@ -117,7 +117,8 @@ def train(model, opt, device,
                     train_dataloader = DataLoader(dataset=train_dataset,
                                                   batch_size=args.batch_size,
                                                   sampler=SubsetRandomSampler(extended_indices),
-                                                  drop_last=True)
+                                                  drop_last=True,
+                                                  pin_memory=True)
                     print(f'train_dataloader (for sampling): {len(train_dataloader)}')
                     extended_clock = args.extended_clock_timer
                     conditional_batch_norm = args.conditional_batch_norm
@@ -496,11 +497,13 @@ def test_MNIST():
 
     train_dl = DataLoader(dataset=train_dataset,
                           batch_size=batch_size,
-                          sampler=train_sampler)
+                          sampler=train_sampler,
+                          pin_memory=True)
     print(f'len(train_dl): {len(train_dl)}')
     val_dl = DataLoader(dataset=train_dataset,
                         batch_size=batch_size,
-                        sampler=val_sampler)
+                        sampler=val_sampler,
+                        pin_memory=True)
     print(f'len(val_dl): {len(val_dl)}')
 
     test_images, test_labels = mndata.load_testing()
@@ -509,7 +512,8 @@ def test_MNIST():
     # print(f'len(test_dataset): {len(test_dataset)}')
     test_dl = DataLoader(dataset=test_dataset,
                          batch_size=batch_size,
-                         shuffle=True)
+                         shuffle=True,
+                         pin_memory=True)
     print(f'len(test_dl): {len(test_dl)}')
 
     print('constructing a model ...')
