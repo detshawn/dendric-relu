@@ -107,6 +107,7 @@ def train(model, opt, device,
         guess = (epoch+1) > args.guess_trigger_epoch and args.guess
         ge2e = (epoch+1) > args.ge2e_trigger_epoch and args.ge2e_loss
         partial_training = None
+        partial_set_sampling = False
 
         if guess and args.partial_training:
             if extended_clock == 0:
@@ -142,8 +143,14 @@ def train(model, opt, device,
 
                 if extended_clock == 0:
                     train_dataloader = orig_train_dataloader
-                    print(f'train_dataloader (for measurement): {len(train_dataloader)}')
-                    extended_indices = []
+
+                    partial_set_sampling = not (args.fixed_partial_set and len(extended_indices) > 0)
+                    if partial_set_sampling:
+                        print(f'train_dataloader (for measurement): {len(train_dataloader)}')
+                        extended_indices = []
+                    else:
+                        print(f'train_dataloader (for entire set): {len(train_dataloader)}')
+
                     conditional_batch_norm = False
                     for p in model.parameters():
                         p.requires_grad = True
@@ -253,7 +260,7 @@ def train(model, opt, device,
                     pred_cnt['guess_true_neg'] = pred_cnt['guess_true_neg'] + (guess_pred_eval[pred_eval == 0] == 0).sum()
                     pred_cnt['guess_false_pos'] = pred_cnt['guess_false_pos'] + (guess_pred_eval[pred_eval == 0] == 1).sum()
                     pred_cnt['guess_false_neg'] = pred_cnt['guess_false_neg'] + (guess_pred_eval[pred_eval == 1] == 0).sum()
-                    if extended_clock == 0:
+                    if partial_set_sampling:
                         passed = (guess_pred_eval == 0) * (pred_eval.reshape(-1, 1) == 0)
                         extended_indices.extend([idx.item() for i, idx in enumerate(x_idx) if passed[i]])
 
@@ -576,6 +583,7 @@ if __name__ == "__main__":
 
     parser.add_argument('--guess', action='store_true')
     parser.add_argument('--partial-training', action='store_true')
+    parser.add_argument('--fixed-partial-set', action='store_true')
     parser.add_argument('--extended-layers', action='store_true')
     parser.add_argument('--conditional-batch-norm', action='store_true')
     parser.add_argument('-guess-trigger-epoch', type=int)
