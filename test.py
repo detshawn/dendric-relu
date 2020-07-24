@@ -262,7 +262,7 @@ def train(model, opt, device,
                     pred_cnt['guess_false_pos'] = pred_cnt['guess_false_pos'] + (guess_pred_eval[pred_eval == 0] == 1).sum()
                     pred_cnt['guess_false_neg'] = pred_cnt['guess_false_neg'] + (guess_pred_eval[pred_eval == 1] == 0).sum()
                     if partial_set_sampling:
-                        passed = (guess_pred_eval == 0) * (pred_eval.reshape(-1, 1) == 0)
+                        passed = (guess_pred_eval == 0)
                         extended_indices.extend([idx.item() for i, idx in enumerate(x_idx) if passed[i]])
 
                 distr['z_means'].append(z_mean_eval.clone().detach().cpu().numpy())
