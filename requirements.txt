@@ -1,0 +1,9 @@
+torch
+torchvision
+tensorboard
+tensorboardX
+matplotlib
+python-mnist
+pyyaml
+sklearn
+scipy
