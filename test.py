@@ -3,6 +3,7 @@ from torch.utils.data import Dataset, DataLoader, SubsetRandomSampler
 import matplotlib.pyplot as plt
 import matplotlib.colors as colors
 from functools import reduce
+import time
 
 from mnist import MNIST
 from utils import *
@@ -101,6 +102,7 @@ def train(model, opt, device,
     orig_train_dataloader = train_dataloader
     for epoch in range(init_epoch, epochs):
         print(f':: {epoch}-th epoch >>>')
+        start = time.time()
 
         embeds_for_ge2e = [[] for _ in range(10)]
 
@@ -441,6 +443,8 @@ def train(model, opt, device,
                 }, os.path.join(args.ckpt_model_dir, ckpt_model_filename))
                 print(">> ", str(epoch), "th checkpoint is saved!")
 
+        end = time.time()
+        print(f'::   ---- processing time: {int((end-start)/3600)}:{int((end-start)%3600/60)}:{(end-start)%60:.3f}')
         prev_iter = prev_iter + len(train_dataloader)
 
     return {'losses': losses,
