@@ -543,6 +543,9 @@ def test_MNIST():
             exit(1)
     else:
         init_epoch, init_iter = 0, 0
+
+    if args.data_parallel:
+        model = torch.nn.DataParallel(model)
     model = model.to(device)
     print(model)
     print(f'# parameters: {sum(p.numel() for p in model.parameters())}')
@@ -598,6 +601,7 @@ if __name__ == "__main__":
     parser.add_argument('-load-model-path')
     parser.add_argument('-mnist-data-path', default='../mnist')
 
+    parser.add_argument('--data-parallel', action='store_true')
     args = parser.parse_args()
 
     if args.guess:
