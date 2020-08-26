@@ -7,6 +7,8 @@ from functools import reduce
 from mnist import MNIST
 from utils import *
 
+from parallel import DataParallelModel, DataParallelCriterion
+
 from model.shallownet import ShallowNet
 from argparse import ArgumentParser
 import yaml
@@ -51,10 +53,17 @@ def train(model, opt, device,
           val_dataloader, eval_step,
           init_epoch, init_iter, epochs, display_step):
     logger = Logger()
+
     mse_fn = torch.nn.MSELoss()
     ce_fn = build_focal_loss(args.gamma) if args.focal_loss else torch.nn.CrossEntropyLoss()
     kl_fn = KLLoss
     guess_bce_fn = torch.nn.BCELoss()
+
+    if args.data_parallel and args.data_parallel_loss_parallel:
+        mse_fn = DataParallelCriterion(mse_fn)
+        ce_fn = DataParallelCriterion(ce_fn)
+        kl_fn = DataParallelCriterion(kl_fn)
+        guess_bce_fn = DataParallelCriterion(guess_bce_fn)
 
     gamma_scaling_fn = None
     if args.focal_loss:
@@ -545,7 +554,11 @@ def test_MNIST():
         init_epoch, init_iter = 0, 0
 
     if args.data_parallel:
-        model = torch.nn.DataParallel(model)
+        if not args.data_parallel_loss_parallel:
+            model = torch.nn.DataParallel(model)
+        else:
+            model = DataParallelModel(model)
+
     model = model.to(device)
     print(model)
     print(f'# parameters: {sum(p.numel() for p in model.parameters())}')
@@ -602,6 +615,8 @@ if __name__ == "__main__":
     parser.add_argument('-mnist-data-path', default='../mnist')
 
     parser.add_argument('--data-parallel', action='store_true')
+    parser.add_argument('-data-parallel-loss-parallel', default=False, type=bool)
+
     args = parser.parse_args()
 
     if args.guess:
