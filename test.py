@@ -99,6 +99,8 @@ def train(model, opt, device,
     extended_clock = 1
     prev_iter = init_iter
 
+    times_per_epoch = []
+
     orig_train_dataloader = train_dataloader
     for epoch in range(init_epoch, epochs):
         print(f':: {epoch}-th epoch >>>')
@@ -179,8 +181,8 @@ def train(model, opt, device,
         if args.focal_loss:
             scaling_factor = gamma_scaling_fn(epoch, 3/5*epochs-1)
             focal_kwargs = dict(gamma=(args.gamma * scaling_factor))
-            print(f'scaling_factor: {scaling_factor}')
-        print(f'focal_kwargs: {focal_kwargs}')
+            print(f'> scaling_factor: {scaling_factor}')
+        print(f'> focal_kwargs: {focal_kwargs}')
 
         model.train()
         for i, data in enumerate(iter(train_dataloader)):
@@ -441,14 +443,16 @@ def train(model, opt, device,
                     'model_state_dict': model.state_dict(),
                     'optimizer_state_dict': opt.state_dict()
                 }, os.path.join(args.ckpt_model_dir, ckpt_model_filename))
-                print(">> ", str(epoch), "th checkpoint is saved!")
+                print("> ", str(epoch), "th checkpoint is saved!")
 
-        end = time.time()
-        print(f'::   ---- processing time: {int((end-start)/3600)}:{int((end-start)%3600/60)}:{(end-start)%60:.3f}')
+        times_per_epoch.append(time.time() - start)
+        print(f'   {epoch}-th epoch <<< processing time: '
+              f'{int((times_per_epoch[-1])/3600)}:{int((times_per_epoch[-1])%3600/60)}:{(times_per_epoch[-1])%60:.3f}')
         prev_iter = prev_iter + len(train_dataloader)
 
     return {'losses': losses,
-            'val_losses': val_losses}
+            'val_losses': val_losses,
+            'proc_time_per_epoch': times_per_epoch}
 
 
 def plot_result(result, tag=None):
