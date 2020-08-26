@@ -106,67 +106,63 @@ def train(model, opt, device,
 
         guess = (epoch+1) > args.guess_trigger_epoch and args.guess
         ge2e = (epoch+1) > args.ge2e_trigger_epoch and args.ge2e_loss
+        conditional = (epoch+1) > args.conditional_trigger_epoch and args.conditional_batch_norm
         partial_training = None
         partial_set_sampling = False
 
-        if guess and args.partial_training:
-            if extended_clock == 0:
-                print(f'extended_clock: {extended_clock}, extended_indices: {len(extended_indices)}')
-                if len(extended_indices) > 0:
-                    print(f'extended_indices[{len(extended_indices)}]')
-                    train_dataloader = DataLoader(dataset=train_dataset,
-                                                  batch_size=args.batch_size,
-                                                  sampler=SubsetRandomSampler(extended_indices),
-                                                  drop_last=True,
-                                                  pin_memory=True)
-                    print(f'train_dataloader (for sampling): {len(train_dataloader)}')
-                    extended_clock = args.extended_clock_timer
-                    conditional_batch_norm = args.conditional_batch_norm
-                    for p in model.parameters():
-                        p.requires_grad = False
-                    for p in model.encoder.bns.parameters():
-                        p.requires_grad = True
-
-                    partial_training = True
-
-                else:
-                    print(f'train_dataloader <- orig_train_dataloader {len(train_dataloader)}')
-                    train_dataloader = orig_train_dataloader
-                    extended_clock = 5
-                    conditional_batch_norm = False
-                    for p in model.parameters():
-                        p.requires_grad = True
-                    for p in model.encoder.bns.parameters():
-                        p.requires_grad = False
-
-                    partial_training = False
-
-            else:
-                extended_clock = max(extended_clock - 1, 0)
-
+        if guess:
+            if args.partial_training:
                 if extended_clock == 0:
-                    train_dataloader = orig_train_dataloader
+                    print(f'extended_clock: {extended_clock}, extended_indices: {len(extended_indices)}')
+                    if len(extended_indices) > 0:
+                        print(f'extended_indices[{len(extended_indices)}]')
+                        train_dataloader = DataLoader(dataset=train_dataset,
+                                                      batch_size=args.batch_size,
+                                                      sampler=SubsetRandomSampler(extended_indices),
+                                                      drop_last=True,
+                                                      pin_memory=True)
+                        print(f'train_dataloader (for sampling): {len(train_dataloader)}')
+                        extended_clock = args.extended_clock_timer
+                        for p in model.parameters():
+                            p.requires_grad = False
+                        for p in model.encoder.bns.parameters():
+                            p.requires_grad = True
 
-                    partial_set_sampling = not (args.fixed_partial_set and len(extended_indices) > 0)
-                    if partial_set_sampling:
-                        print(f'train_dataloader (for measurement): {len(train_dataloader)}')
-                        extended_indices = []
+                        partial_training = True
+
                     else:
-                        print(f'train_dataloader (for entire set): {len(train_dataloader)}')
+                        print(f'train_dataloader <- orig_train_dataloader {len(train_dataloader)}')
+                        train_dataloader = orig_train_dataloader
+                        extended_clock = 5
+                        for p in model.parameters():
+                            p.requires_grad = True
+                        for p in model.encoder.bns.parameters():
+                            p.requires_grad = False
 
-                    conditional_batch_norm = False
-                    for p in model.parameters():
-                        p.requires_grad = True
-                    for p in model.encoder.bns.parameters():
-                        p.requires_grad = False
-
-                    partial_training = False
+                        partial_training = False
 
                 else:
-                    conditional_batch_norm = args.conditional_batch_norm
-                    partial_training = True
-        else:
-            conditional_batch_norm = False
+                    extended_clock = max(extended_clock - 1, 0)
+
+                    if extended_clock == 0:
+                        train_dataloader = orig_train_dataloader
+
+                        partial_set_sampling = not (args.fixed_partial_set and len(extended_indices) > 0)
+                        if partial_set_sampling:
+                            print(f'train_dataloader (for measurement): {len(train_dataloader)}')
+                            extended_indices = []
+                        else:
+                            print(f'train_dataloader (for entire set): {len(train_dataloader)}')
+
+                        for p in model.parameters():
+                            p.requires_grad = True
+                        for p in model.encoder.bns.parameters():
+                            p.requires_grad = False
+
+                        partial_training = False
+
+                    else:
+                        partial_training = True
 
         focal_kwargs = {}
         if args.focal_loss:
@@ -185,7 +181,7 @@ def train(model, opt, device,
             target = target.to(device)
 
             # forward
-            enc_kwargs = dict(guess=guess, conditional=args.conditional_batch_norm)
+            enc_kwargs = dict(guess=guess, conditional=conditional)
             if args.extended_layers:
                 enc_kwargs['ext_training'] = (extended_clock > 0)
             y, (cl, z_sample, enc_intermediates) = model(x, enc_kwargs=enc_kwargs)
@@ -239,7 +235,7 @@ def train(model, opt, device,
             opt.step()
 
             # eval
-            enc_kwargs_eval = dict(guess=guess, conditional=args.conditional_batch_norm)
+            enc_kwargs_eval = dict(guess=guess, conditional=conditional)
             model.eval()
             with torch.no_grad():
                 _, (cl_eval, _, enc_intermediates_eval) = model(x, dropout=False, enc_kwargs=enc_kwargs_eval)
@@ -358,7 +354,7 @@ def train(model, opt, device,
                 val_x = val_x.to(device)
                 val_target = val_target.to(device)
                 with torch.no_grad():
-                    val_enc_kwargs = dict(guess=guess, conditional=args.conditional_batch_norm)
+                    val_enc_kwargs = dict(guess=guess, conditional=conditional)
                     val_y, (val_cl, val_z_sample, val_enc_intermediates) = model(val_x, enc_kwargs=val_enc_kwargs)
                     val_z_mean = val_enc_intermediates['z_mean']
                     val_z_log_var = val_enc_intermediates['z_log_var']
@@ -595,6 +591,7 @@ if __name__ == "__main__":
     parser.add_argument('--extended-layers', action='store_true')
     parser.add_argument('--conditional-batch-norm', action='store_true')
     parser.add_argument('-guess-trigger-epoch', type=int)
+    parser.add_argument('-conditional-trigger-epoch', type=int)
 
     parser.add_argument('-ckpt-model-dir', default='./ckpts/')
     parser.add_argument('--load-model', action='store_true')
@@ -608,6 +605,12 @@ if __name__ == "__main__":
             args.guess_trigger_epoch = int(args.epochs * 2/3)
     else:
         args.guess_trigger_epoch = args.epochs
+
+    if args.conditional_batch_norm:
+        if args.conditional_trigger_epoch is None:
+            args.conditional_trigger_epoch = args.guess_trigger_epoch + 5
+    else:
+        args.conditional_trigger_epoch = args.epochs
 
     if args.ge2e_loss:
         if args.ge2e_trigger_epoch is None:
