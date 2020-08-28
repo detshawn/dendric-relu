@@ -9,6 +9,9 @@ from mnist import MNIST
 from utils import *
 
 from parallel import DataParallelModel, DataParallelCriterion
+import torch.multiprocessing as mp
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel
 
 from model.shallownet import ShallowNet
 from argparse import ArgumentParser
@@ -490,11 +493,29 @@ def plot_result(result, tag=None):
     plt.savefig(filename)
 
 
-def main_worker():
-    print('>>> MNIST test starts!')
+def main_worker(gpu, ngpus_per_node, args):
+    global best_acc1
+    args.gpu = gpu
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    batch_size = args.batch_size if device is "cuda" else 4
+    print('>>> MNIST test starts!')
+    if not torch.cuda.is_available():
+        device = "cpu"
+    else:
+        device = "cuda"
+        if args.gpu is not None:
+            device = device + f":{args.gpu}"
+        torch.cuda.set_device(args.gpu)
+
+        print("Use GPU: {} for training".format(args.gpu))
+        if args.rank == -1:
+            args.rank = int(os.environ["RANK"])
+        args.rank = args.rank * ngpus_per_node + gpu
+        dist.init_process_group(backend='nccl',
+                                init_method='tcp://127.0.0.1:6006',
+                                world_size=args.world_size,
+                                rank=args.rank)
+
+    batch_size = args.batch_size if device is not "cpu" else 4
 
     print('importing data ...')
     mndata = MNIST(args.mnist_data_path)
@@ -561,7 +582,9 @@ def main_worker():
     else:
         init_epoch, init_iter = 0, 0
 
-    if args.data_parallel:
+    if args.multiprocessing_distributed:
+        model = DistributedDataParallel(model, device_ids=[args.gpu])
+    elif args.data_parallel:
         if not args.data_parallel_loss_parallel:
             model = torch.nn.DataParallel(model)
         else:
@@ -584,8 +607,16 @@ def main_worker():
 
 
 def main():
-    # test_activation_functions()
-    main_worker()
+    if args.world_size == -1:
+        args.world_size = int(os.environ["WORLD_SIZE"])
+    ngpus_per_node = torch.cuda.device_count()
+    if args.multiprocessing_distributed:
+        # Since we have ngpus_per_node processes per node, the total world_size
+        # needs to be adjusted accordingly
+        args.world_size = ngpus_per_node * args.world_size
+        mp.spawn(main_worker, nprocs=ngpus_per_node, args=(ngpus_per_node, args))
+    else:
+        main_worker(args.gpu, ngpus_per_node, args)
 
 
 if __name__ == "__main__":
@@ -622,8 +653,17 @@ if __name__ == "__main__":
     parser.add_argument('-load-model-path')
     parser.add_argument('-mnist-data-path', default='../mnist')
 
+    parser.add_argument('-gpu', default=None, type=int,
+                        help='GPU id to use.')
+    parser.add_argument('--world-size', default=-1, type=int,
+                        help='number of nodes for distributed training')
+    parser.add_argument('-rank', default=-1, type=int,
+                        help='node rank for distributed training')
     parser.add_argument('--data-parallel', action='store_true')
     parser.add_argument('-data-parallel-loss-parallel', default=False, type=bool)
+    parser.add_argument('--multiprocessing-distributed', action='store_true',
+                        help='Use multi-processing distributed training to launch '
+                             'N processes per node, which has N GPUs.')
 
     args = parser.parse_args()
 
