@@ -61,11 +61,17 @@ def train(model, opt, device, mp_distributed,
           init_epoch, init_iter, epochs, display_step):
     logger = Logger()
 
-    def build_decorate_data_parallel_criterion(is_condition_fulfilled):
+    def build_decorate_data_parallel_criterion(is_distributed, is_data_parallel):
         def _decorate_data_parallel_criterion(fn):
-            return DataParallelCriterion(fn) if is_condition_fulfilled else fn
+            if is_distributed:
+                return fn.to(device)
+            elif is_data_parallel:
+                return DataParallelCriterion(fn)
+            else:
+                return fn
         return _decorate_data_parallel_criterion
-    dec = build_decorate_data_parallel_criterion(args.data_parallel and args.data_parallel_loss_parallel)
+    dec = build_decorate_data_parallel_criterion(mp_distributed,
+                                                 args.data_parallel and args.data_parallel_loss_parallel)
 
     mse_fn = dec(torch.nn.MSELoss())
     ce_fn = dec(build_focal_loss(args.gamma) if args.focal_loss else torch.nn.CrossEntropyLoss())
@@ -605,6 +611,7 @@ def main_worker(gpu, ngpus_per_node, args):
 
 def main():
     if args.world_size == -1:
+        # Node is currently set to 1 since this script is written for a single-hardware case
         args.world_size = 1  # int(os.environ["WORLD_SIZE"])
     ngpus_per_node = torch.cuda.device_count()
     if args.multiprocessing_distributed:
