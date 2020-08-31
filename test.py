@@ -12,6 +12,7 @@ from parallel import DataParallelModel, DataParallelCriterion
 import torch.multiprocessing as mp
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel
+from torch.utils.data.distributed import DistributedSampler
 
 from model.shallownet import ShallowNet
 from argparse import ArgumentParser
@@ -52,22 +53,24 @@ def test_activation_functions():
     print(f'hypo(data): {hypo(t)}')
 
 
-def train(model, opt, device,
+def train(model, opt, device, mp_distributed,
           train_dataloader, train_dataset,
-          val_dataloader, eval_step,
+          val_dataloader,
+          train_sampler, val_sampler,
+          eval_step,
           init_epoch, init_iter, epochs, display_step):
     logger = Logger()
 
-    mse_fn = torch.nn.MSELoss()
-    ce_fn = build_focal_loss(args.gamma) if args.focal_loss else torch.nn.CrossEntropyLoss()
-    kl_fn = KLLoss
-    guess_bce_fn = torch.nn.BCELoss()
+    def build_decorate_data_parallel_criterion(is_condition_fulfilled):
+        def _decorate_data_parallel_criterion(fn):
+            return DataParallelCriterion(fn) if is_condition_fulfilled else fn
+        return _decorate_data_parallel_criterion
+    dec = build_decorate_data_parallel_criterion(args.data_parallel and args.data_parallel_loss_parallel)
 
-    if args.data_parallel and args.data_parallel_loss_parallel:
-        mse_fn = DataParallelCriterion(mse_fn)
-        ce_fn = DataParallelCriterion(ce_fn)
-        kl_fn = DataParallelCriterion(kl_fn)
-        guess_bce_fn = DataParallelCriterion(guess_bce_fn)
+    mse_fn = dec(torch.nn.MSELoss())
+    ce_fn = dec(build_focal_loss(args.gamma) if args.focal_loss else torch.nn.CrossEntropyLoss())
+    kl_fn = dec(KLLoss)
+    guess_bce_fn = dec(torch.nn.BCELoss())
 
     gamma_scaling_fn = None
     if args.focal_loss:
@@ -109,6 +112,9 @@ def train(model, opt, device,
         print(f':: {epoch}-th epoch >>>')
         start = time.time()
 
+        if mp_distributed:
+            train_sampler.set_epoch(epoch)
+
         embeds_for_ge2e = [[] for _ in range(10)]
 
         pred_cnt = {'total': 0, 'true': 0,
@@ -132,9 +138,10 @@ def train(model, opt, device,
                     print(f'extended_clock: {extended_clock}, extended_indices: {len(extended_indices)}')
                     if len(extended_indices) > 0:
                         print(f'extended_indices[{len(extended_indices)}]')
-                        train_dataloader = DataLoader(dataset=train_dataset,
+                        train_dataloader = DataLoader(dataset=torch.utils.data.Subset(train_dataset, extended_indices),
                                                       batch_size=args.batch_size,
-                                                      sampler=SubsetRandomSampler(extended_indices),
+                                                      sampler=train_sampler,
+                                                      shuffle=(train_sampler is None),
                                                       drop_last=True,
                                                       pin_memory=True)
                         print(f'train_dataloader (for sampling): {len(train_dataloader)}')
@@ -521,37 +528,26 @@ def main_worker(gpu, ngpus_per_node, args):
     mndata = MNIST(args.mnist_data_path)
     train_images, train_labels = mndata.load_testing()
     # print(mndata.display(train_images[10]))
-    train_dataset = MNISTDataset(np.array(train_images), np.array(train_labels))
-    # print(f'len(train_dataset): {len(train_dataset)}')
-    random_seed = 42
-    l = len(train_dataset)
-    indices = list(range(l))
+    full_dataset = MNISTDataset(np.array(train_images), np.array(train_labels))
+    l = len(full_dataset)
     split = int(np.floor(args.val_set_ratio * l))
-    np.random.seed(random_seed)
-    np.random.shuffle(indices)
-    train_indices, val_indices = indices[split:], indices[:split]
+    train_dataset, val_dataset = torch.utils.data.random_split(full_dataset, [split, l-split])
+    train_sampler = DistributedSampler(train_dataset) if args.multiprocessing_distributed else None
+    val_sampler = DistributedSampler(val_dataset) if args.multiprocessing_distributed else None
 
-    train_sampler, val_sampler = SubsetRandomSampler(train_indices), SubsetRandomSampler(val_indices)
-
-    train_dl = DataLoader(dataset=train_dataset,
-                          batch_size=batch_size,
-                          sampler=train_sampler,
-                          pin_memory=True)
+    train_dl = DataLoader(dataset=train_dataset, batch_size=batch_size,
+                          shuffle=(train_sampler is None), pin_memory=True, sampler=train_sampler)
     print(f'len(train_dl): {len(train_dl)}')
-    val_dl = DataLoader(dataset=train_dataset,
-                        batch_size=batch_size,
-                        sampler=val_sampler,
-                        pin_memory=True)
+    val_dl = DataLoader(dataset=val_dataset, batch_size=batch_size,
+                        shuffle=(val_sampler is None), pin_memory=True, sampler=val_sampler)
     print(f'len(val_dl): {len(val_dl)}')
 
     test_images, test_labels = mndata.load_testing()
     # print(mndata.display(test_images[10]))
     test_dataset = MNISTDataset(np.array(test_images), np.array(test_labels))
     # print(f'len(test_dataset): {len(test_dataset)}')
-    test_dl = DataLoader(dataset=test_dataset,
-                         batch_size=batch_size,
-                         shuffle=True,
-                         pin_memory=True)
+    test_dl = DataLoader(dataset=test_dataset, batch_size=batch_size,
+                         shuffle=True, pin_memory=True)
     print(f'len(test_dl): {len(test_dl)}')
 
     print('constructing a model ...')
@@ -597,9 +593,10 @@ def main_worker(gpu, ngpus_per_node, args):
 
     print('training the model ...')
 
-    result = train(model=model, opt=opt, device=device,
+    result = train(model=model, opt=opt, device=device, mp_distributed=args.multiprocessing_distributed,
                    train_dataloader=train_dl, train_dataset=train_dataset,
                    val_dataloader=val_dl,
+                   train_sampler=train_sampler, val_sampler=val_sampler,
                    eval_step=pow(2, math.floor(math.log2(int(1/args.val_set_ratio)))),
                    init_epoch=init_epoch, init_iter=init_iter, epochs=args.epochs, display_step=args.display_step)
 
