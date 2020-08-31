@@ -530,7 +530,7 @@ def main_worker(gpu, ngpus_per_node, args):
     # print(mndata.display(train_images[10]))
     full_dataset = MNISTDataset(np.array(train_images), np.array(train_labels))
     l = len(full_dataset)
-    split = int(np.floor(args.val_set_ratio * l))
+    split = int(np.floor((1-args.val_set_ratio) * l))
     train_dataset, val_dataset = torch.utils.data.random_split(full_dataset, [split, l-split])
     train_sampler = DistributedSampler(train_dataset) if args.multiprocessing_distributed else None
     val_sampler = DistributedSampler(val_dataset) if args.multiprocessing_distributed else None
@@ -605,7 +605,7 @@ def main_worker(gpu, ngpus_per_node, args):
 
 def main():
     if args.world_size == -1:
-        args.world_size = int(os.environ["WORLD_SIZE"])
+        args.world_size = 1  # int(os.environ["WORLD_SIZE"])
     ngpus_per_node = torch.cuda.device_count()
     if args.multiprocessing_distributed:
         # Since we have ngpus_per_node processes per node, the total world_size
