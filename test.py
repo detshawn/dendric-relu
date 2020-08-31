@@ -53,49 +53,15 @@ def test_activation_functions():
     print(f'hypo(data): {hypo(t)}')
 
 
-def train(model, opt, device, mp_distributed,
+def train(model, opt, device, logger, args,
           train_dataloader, train_dataset,
           val_dataloader,
-          train_sampler, val_sampler,
           eval_step,
-          init_epoch, init_iter, epochs, display_step):
-    logger = Logger()
-
-    def build_decorate_data_parallel_criterion(is_distributed, is_data_parallel):
-        def _decorate_data_parallel_criterion(fn):
-            if is_distributed:
-                return fn.to(device)
-            elif is_data_parallel:
-                return DataParallelCriterion(fn)
-            else:
-                return fn
-        return _decorate_data_parallel_criterion
-    dec = build_decorate_data_parallel_criterion(mp_distributed,
-                                                 args.data_parallel and args.data_parallel_loss_parallel)
-
-    mse_fn = dec(torch.nn.MSELoss())
-    ce_fn = dec(build_focal_loss(args.gamma) if args.focal_loss else torch.nn.CrossEntropyLoss())
-    kl_fn = dec(KLLoss)
-    guess_bce_fn = dec(torch.nn.BCELoss())
-
-    gamma_scaling_fn = None
-    if args.focal_loss:
-        def build_gamma_scaling_fn(function):
-            def scaling_sigmoid(x, offset, width_factor=20):
-                return sigmoid((x-offset) * 4 / width_factor)
-
-            def scaling_cos(x, offset, pre_offset=False, T=20):
-                x_tilde = x - offset
-                if not pre_offset:
-                    x_tilde = max(x_tilde, 0)
-                return (-math.cos(x_tilde / T*(2*math.pi)) + 1) / 2
-
-            if function == 'sigmoid':
-                return scaling_sigmoid
-            elif function == 'cos':
-                return scaling_cos
-
-        gamma_scaling_fn = build_gamma_scaling_fn(args.gamma_scaling_function)
+          epoch, prev_iter, display_step,
+          mse_fn=None, ce_fn=None, kl_fn=None, guess_bce_fn=None,
+          guess=False, ge2e=False, conditional=False, ext_training=False,
+          partial_training=None, partial_set_sampling=False,
+          focal_kwargs=None):
 
     losses = {'iter': [],
               'loss': [], 'mse_loss': [], 'ce_loss': [], 'kl_loss': [],
@@ -106,370 +72,277 @@ def train(model, opt, device, mp_distributed,
                   'guess_bce_loss': [],
                   'accuracy': []}
 
-    log_step = 4
-    extended_indices = []
-    extended_clock = 1
-    prev_iter = init_iter
+    embeds_for_ge2e = [[] for _ in range(10)]
 
-    times_per_epoch = []
+    pred_cnt = {'total': 0, 'true': 0,
+                'guess_true_pos': 0, 'guess_true_neg': 0,
+                'guess_false_pos': 0, 'guess_false_neg': 0}
+    val_pred_cnt = {'total': 0, 'true': 0, 'guess_true_pos': 0, 'guess_true_neg': 0}
+    val_iter = iter(val_dataloader)
+    distr = {'z_means': [], 'y_labels': [], 'i_successes': []}
 
-    orig_train_dataloader = train_dataloader
-    for epoch in range(init_epoch, epochs):
-        print(f':: {epoch}-th epoch >>>')
-        start = time.time()
+    hist_pairs = np.zeros((10, 10))
 
-        if mp_distributed:
-            train_sampler.set_epoch(epoch)
+    model.train()
+    for i, data in enumerate(iter(train_dataloader)):
+        opt.zero_grad()
+        meta = {'loss': {}, 'acc': {}}
 
-        embeds_for_ge2e = [[] for _ in range(10)]
+        x_idx, x, target = data
+        x = x.to(device)
+        target = target.to(device)
 
-        pred_cnt = {'total': 0, 'true': 0,
-                    'guess_true_pos': 0, 'guess_true_neg': 0,
-                    'guess_false_pos': 0, 'guess_false_neg': 0}
-        val_pred_cnt = {'total': 0, 'true': 0, 'guess_true_pos': 0, 'guess_true_neg': 0}
-        val_iter = iter(val_dataloader)
-        distr = {'z_means': [], 'y_labels': [], 'i_successes': []}
+        # forward
+        enc_kwargs = dict(guess=guess, conditional=conditional, ext_training=ext_training)
+        y, (cl, z_sample, enc_intermediates) = model(x, enc_kwargs=enc_kwargs)
 
-        hist_pairs = np.zeros((10, 10))
+        z_mean = enc_intermediates['z_mean']
+        z_log_var = enc_intermediates['z_log_var']
+        # predict classification
+        pred = (torch.argmax(cl, dim=1) == target).detach()
 
-        guess = (epoch+1) > args.guess_trigger_epoch and args.guess
-        ge2e = (epoch+1) > args.ge2e_trigger_epoch and args.ge2e_loss
-        conditional = (epoch+1) > args.conditional_trigger_epoch and args.conditional_batch_norm
-        partial_training = None
-        partial_set_sampling = False
+        # losses
+        mse_loss = mse_fn(y, x)
+        ce_loss = ce_fn(cl, target, **focal_kwargs)
+        kl_loss = kl_fn(z_mean, z_log_var)
+        loss = mse_loss + ce_loss + kl_loss
+
+        meta['loss']['mse'] = mse_loss.item()
+        meta['loss']['ce'] = ce_loss.item()
+        meta['loss']['kl'] = kl_loss.item()
+        meta['loss']['total'] = loss.item()
+
+        ge2e_loss = None
+        if ge2e:
+            for emb, t in zip(z_mean, target):
+                embeds_for_ge2e[t].append(emb)
+            if (i+1) % args.ge2e_step == 0:
+                n_min_samples = 12
+                embeds_for_ge2e_input = [torch.stack(e, dim=0).clone() for e in embeds_for_ge2e if len(e) >= n_min_samples]
+                if len(embeds_for_ge2e_input) > 2:
+                    rect_n = reduce(lambda x, y: min(x, y.size()[0]), embeds_for_ge2e_input, n_min_samples)
+                    embeds_for_ge2e_input = [e[:rect_n, :] for e in embeds_for_ge2e_input]
+                    embeds_for_ge2e_input = torch.stack(embeds_for_ge2e_input, dim=0)
+                    ge2e_loss, eer = model.ge2e_loss(embeds_for_ge2e_input)
+
+                    meta['loss']['ge2e'] = ge2e_loss.item() * .1
+                    meta['loss']['total'] = meta['loss']['total'] + meta['loss']['ge2e']
+
+                    embeds_for_ge2e = [[] for i in range(10)]
 
         if guess:
-            if args.partial_training:
-                if extended_clock == 0:
-                    print(f'extended_clock: {extended_clock}, extended_indices: {len(extended_indices)}')
-                    if len(extended_indices) > 0:
-                        print(f'extended_indices[{len(extended_indices)}]')
-                        train_dataloader = DataLoader(dataset=torch.utils.data.Subset(train_dataset, extended_indices),
-                                                      batch_size=args.batch_size,
-                                                      sampler=train_sampler,
-                                                      shuffle=(train_sampler is None),
-                                                      drop_last=True,
-                                                      pin_memory=True)
-                        print(f'train_dataloader (for sampling): {len(train_dataloader)}')
-                        extended_clock = args.extended_clock_timer
-                        for p in model.parameters():
-                            p.requires_grad = False
-                        for p in model.encoder.bns.parameters():
-                            p.requires_grad = True
+            guess_out = enc_intermediates['guess_out']
+            guess_bce_loss = guess_bce_fn(guess_out.double(), pred.double())
+            # guess_pred = ((guess_out >= .5) == pred.view(-1, 1)).detach()
+            meta['loss']['guess_bce'] = guess_bce_loss.item()
 
-                        partial_training = True
+            loss = loss + guess_bce_loss
+            meta['loss']['total'] = meta['loss']['total'] + meta['loss']['guess_bce']
 
-                    else:
-                        print(f'train_dataloader <- orig_train_dataloader {len(train_dataloader)}')
-                        train_dataloader = orig_train_dataloader
-                        extended_clock = 5
-                        for p in model.parameters():
-                            p.requires_grad = True
-                        for p in model.encoder.bns.parameters():
-                            p.requires_grad = False
+        # backward
+        loss.backward()
+        # update
+        opt.step()
 
-                        partial_training = False
+        # eval
+        enc_kwargs_eval = dict(guess=guess, conditional=conditional)
+        model.eval()
+        with torch.no_grad():
+            _, (cl_eval, _, enc_intermediates_eval) = model(x, dropout=False, enc_kwargs=enc_kwargs_eval)
+            z_mean_eval = enc_intermediates_eval['z_mean']
 
-                else:
-                    extended_clock = max(extended_clock - 1, 0)
+            if (epoch + 1) % log_step == 0 or (epoch + 1) == epochs:
+                for r, c in zip(torch.argmax(cl_eval, dim=1), target):
+                    if r != c:
+                        hist_pairs[r, c] = hist_pairs[r, c] + 1
 
-                    if extended_clock == 0:
-                        train_dataloader = orig_train_dataloader
-
-                        partial_set_sampling = not (args.fixed_partial_set and len(extended_indices) > 0)
-                        if partial_set_sampling:
-                            print(f'train_dataloader (for measurement): {len(train_dataloader)}')
-                            extended_indices = []
-                        else:
-                            print(f'train_dataloader (for entire set): {len(train_dataloader)}')
-
-                        for p in model.parameters():
-                            p.requires_grad = True
-                        for p in model.encoder.bns.parameters():
-                            p.requires_grad = False
-
-                        partial_training = False
-
-                    else:
-                        partial_training = True
-
-        focal_kwargs = {}
-        if args.focal_loss:
-            scaling_factor = gamma_scaling_fn(epoch, 3/5*epochs-1)
-            focal_kwargs = dict(gamma=(args.gamma * scaling_factor))
-            print(f'> scaling_factor: {scaling_factor}')
-        print(f'> focal_kwargs: {focal_kwargs}')
-
-        model.train()
-        for i, data in enumerate(iter(train_dataloader)):
-            opt.zero_grad()
-            meta = {'loss': {}, 'acc': {}}
-
-            x_idx, x, target = data
-            x = x.to(device)
-            target = target.to(device)
-
-            # forward
-            enc_kwargs = dict(guess=guess, conditional=conditional)
-            if args.extended_layers:
-                enc_kwargs['ext_training'] = (extended_clock > 0)
-            y, (cl, z_sample, enc_intermediates) = model(x, enc_kwargs=enc_kwargs)
-
-            z_mean = enc_intermediates['z_mean']
-            z_log_var = enc_intermediates['z_log_var']
-            # predict classification
-            pred = (torch.argmax(cl, dim=1) == target).detach()
-
-            # losses
-            mse_loss = mse_fn(y, x)
-            ce_loss = ce_fn(cl, target, **focal_kwargs)
-            kl_loss = kl_fn(z_mean, z_log_var)
-            loss = mse_loss + ce_loss + kl_loss
-
-            meta['loss']['mse'] = mse_loss.item()
-            meta['loss']['ce'] = ce_loss.item()
-            meta['loss']['kl'] = kl_loss.item()
-            meta['loss']['total'] = loss.item()
-
-            ge2e_loss = None
-            if ge2e:
-                for emb, t in zip(z_mean, target):
-                    embeds_for_ge2e[t].append(emb)
-                if (i+1) % args.ge2e_step == 0:
-                    n_min_samples = 12
-                    embeds_for_ge2e_input = [torch.stack(e, dim=0).clone() for e in embeds_for_ge2e if len(e) >= n_min_samples]
-                    if len(embeds_for_ge2e_input) > 2:
-                        rect_n = reduce(lambda x, y: min(x, y.size()[0]), embeds_for_ge2e_input, n_min_samples)
-                        embeds_for_ge2e_input = [e[:rect_n, :] for e in embeds_for_ge2e_input]
-                        embeds_for_ge2e_input = torch.stack(embeds_for_ge2e_input, dim=0)
-                        ge2e_loss, eer = model.ge2e_loss(embeds_for_ge2e_input)
-
-                        meta['loss']['ge2e'] = ge2e_loss.item() * .1
-                        meta['loss']['total'] = meta['loss']['total'] + meta['loss']['ge2e']
-
-                        embeds_for_ge2e = [[] for i in range(10)]
-
+            pred_eval = (torch.argmax(cl_eval, dim=1) == target).detach()
             if guess:
-                guess_out = enc_intermediates['guess_out']
-                guess_bce_loss = guess_bce_fn(guess_out.double(), pred.double())
-                # guess_pred = ((guess_out >= .5) == pred.view(-1, 1)).detach()
-                meta['loss']['guess_bce'] = guess_bce_loss.item()
+                guess_out_eval = enc_intermediates_eval['guess_out']
+                guess_pred_eval = ((guess_out_eval >= .5) == pred_eval.view(-1, 1)).detach()
 
-                loss = loss + guess_bce_loss
-                meta['loss']['total'] = meta['loss']['total'] + meta['loss']['guess_bce']
+            pred_eval = pred_eval.cpu().numpy()
+            pred_eval_sum = pred_eval.sum()
 
-            # backward
-            loss.backward()
-            # update
-            opt.step()
+            # predict classification
+            if guess:
+                guess_pred_eval = guess_pred_eval.cpu().numpy()
+                pred_cnt['guess_true_pos'] = pred_cnt['guess_true_pos'] + guess_pred_eval[pred_eval == 1].sum()
+                pred_cnt['guess_true_neg'] = pred_cnt['guess_true_neg'] + (guess_pred_eval[pred_eval == 0] == 0).sum()
+                pred_cnt['guess_false_pos'] = pred_cnt['guess_false_pos'] + (guess_pred_eval[pred_eval == 0] == 1).sum()
+                pred_cnt['guess_false_neg'] = pred_cnt['guess_false_neg'] + (guess_pred_eval[pred_eval == 1] == 0).sum()
+                if partial_set_sampling:
+                    passed = (guess_pred_eval == 0)
+                    extended_indices.extend([idx.item() for i, idx in enumerate(x_idx) if passed[i]])
 
-            # eval
-            enc_kwargs_eval = dict(guess=guess, conditional=conditional)
+            distr['z_means'].append(z_mean_eval.clone().detach().cpu().numpy())
+            distr['y_labels'].append(target.clone().detach().cpu().numpy())
+            distr['i_successes'].append(pred_eval)
+
+            pred_cnt['total'] = pred_cnt['total'] + x.size()[0]
+            pred_cnt['true'] = pred_cnt['true'] + pred_eval_sum
+        model.train()
+
+        if (i+1) % display_step == 0 or (i+1) == len(train_dataloader):
+            loss_print = f'>\t {i+1}-th iter:\tloss={loss:.2f},\tmse_loss={mse_loss:.3f},\tce_loss={ce_loss:.2f}\tkl_loss={kl_loss:.5f}'
+            if partial_training:
+                meta['acc']['partial_acc'] = pred_cnt["true"] / pred_cnt["total"]
+                accuracy = meta['acc']['partial_acc']
+                acc_print = f' \t               \tpartial_acc={accuracy:.2f}'
+            else:
+                meta['acc']['acc'] = pred_cnt["true"] / pred_cnt["total"]
+                accuracy = meta['acc']['acc']
+                acc_print = f' \t               \taccuracy={accuracy:.2f}'
+            if guess:
+                loss_print += f'\tguess_bce_loss={guess_bce_loss:.5f}'
+                meta['acc']['guess_acc'] = (pred_cnt["guess_true_pos"]+pred_cnt["guess_true_neg"]) / pred_cnt["total"]
+                guess_acc = meta['acc']['guess_acc']
+                acc_print += f' \t               \tguess_acc={guess_acc:.2f}'
+            if ge2e and ge2e_loss is not None:
+                loss_print += f'\tge2e_loss={ge2e_loss:.5f}'
+
+            print(loss_print)
+            print(acc_print)
+
+            logger.scalars_summary(f'{args.tag}/train', meta['loss'], prev_iter + i + 1)
+            logger.scalars_summary(f'{args.tag}/train_acc', meta['acc'], prev_iter + i + 1)
+            losses['iter'].append(prev_iter+i)
+            losses['loss'].append(loss)
+            losses['mse_loss'].append(mse_loss)
+            losses['ce_loss'].append(ce_loss)
+            losses['kl_loss'].append(kl_loss)
+            losses['accuracy'].append(accuracy)
+            pred_cnt = {'total': 0, 'true': 0,
+                        'guess_true_pos': 0, 'guess_true_neg': 0,
+                        'guess_false_pos': 0, 'guess_false_neg': 0}
+
+            if (epoch + 1) % log_step == 0 or (epoch + 1) == epochs:
+                if (i + 1) == display_step:
+                    distr['z_means'] = np.concatenate(distr['z_means'], axis=0)
+                    distr['y_labels'] = np.concatenate(distr['y_labels'], axis=0)
+                    distr['i_successes'] = np.concatenate(distr['i_successes'], axis=0)
+
+                    fig = plot_results((distr['z_means'], distr['y_labels'], distr['i_successes']), tag=args.tag)
+                    img = fig2rgb_array(fig, expand=False)
+                    logger.image_summary(f'{args.tag}/train', img, prev_iter + i + 1, dataformats='HWC')
+                    plt.close(fig)
+
+                if (i + 1) == len(train_dataloader):
+                    fig, ax = plt.subplots(1)
+                    ax.xaxis.tick_top()
+                    plt.gca().invert_yaxis()
+                    p = ax.pcolormesh(hist_pairs, cmap=plt.cm.Reds,
+                                      norm=colors.PowerNorm(gamma=0.5, vmax=int(len(train_dataset)*.1*.1)))
+                    fig.colorbar(p, label='freq (log scale)')
+                    ax.set_xlabel('target')
+                    ax.set_ylabel('pred')
+                    ax.set_title('Misclassification map')
+                    fig.savefig('test_hist_pairs.png')
+                    img = fig2rgb_array(fig, expand=False)
+                    logger.image_summary(f'{args.tag}/train_hist_pairs', img, epoch, dataformats='HWC')
+                    plt.close(fig)
+                    if log_step < 32:
+                        log_step = log_step * 2
+
+            distr = {'z_means': [], 'y_labels': [], 'i_successes': []}
+
+        del x, y, target
+        del loss, mse_loss, ce_loss, kl_loss
+        if guess:
+            del guess_bce_loss
+
+        if (i + 1) % eval_step == 0 or (i+1) == len(train_dataloader):
             model.eval()
+            val_meta = {'loss': {}, 'acc': {}}
+
+            try:
+                val_data = next(val_iter)
+            except StopIteration:
+                val_iter = iter(val_dataloader)
+                val_data = next(val_iter)
+            val_x_idx, val_x, val_target = val_data
+            val_x = val_x.to(device)
+            val_target = val_target.to(device)
             with torch.no_grad():
-                _, (cl_eval, _, enc_intermediates_eval) = model(x, dropout=False, enc_kwargs=enc_kwargs_eval)
-                z_mean_eval = enc_intermediates_eval['z_mean']
+                val_enc_kwargs = dict(guess=guess, conditional=conditional)
+                val_y, (val_cl, val_z_sample, val_enc_intermediates) = model(val_x, enc_kwargs=val_enc_kwargs)
+                val_z_mean = val_enc_intermediates['z_mean']
+                val_z_log_var = val_enc_intermediates['z_log_var']
+                val_pred = (torch.argmax(val_cl, dim=1) == val_target).detach()
 
-                if (epoch + 1) % log_step == 0 or (epoch + 1) == epochs:
-                    for r, c in zip(torch.argmax(cl_eval, dim=1), target):
-                        if r != c:
-                            hist_pairs[r, c] = hist_pairs[r, c] + 1
+                val_mse_loss = mse_fn(val_y, val_x)
+                val_ce_loss = ce_fn(val_cl, val_target, **focal_kwargs)
+                val_kl_loss = kl_fn(val_z_mean, val_z_log_var)
+                val_loss = val_mse_loss + val_ce_loss + val_kl_loss
 
-                pred_eval = (torch.argmax(cl_eval, dim=1) == target).detach()
+                val_meta['loss']['val_mse'] = val_mse_loss.clone().detach().cpu()
+                val_meta['loss']['val_ce'] = val_ce_loss.clone().detach().cpu()
+                val_meta['loss']['val_kl'] = val_kl_loss.clone().detach().cpu()
+                val_meta['loss']['val_total'] = val_loss.clone().detach().cpu()
+
                 if guess:
-                    guess_out_eval = enc_intermediates_eval['guess_out']
-                    guess_pred_eval = ((guess_out_eval >= .5) == pred_eval.view(-1, 1)).detach()
+                    val_guess_out = val_enc_intermediates['guess_out']
+                    val_guess_pred = ((val_guess_out >= .5) == val_pred.view(-1, 1)).detach()
 
-                pred_eval = pred_eval.cpu().numpy()
-                pred_eval_sum = pred_eval.sum()
+                    val_guess_bce_loss = guess_bce_fn(val_guess_out.double(), val_pred.double())
+                    val_meta['loss']['val_guess_bce'] = val_guess_bce_loss.clone().detach().cpu()
 
-                # predict classification
+                    val_loss = val_loss + val_guess_bce_loss
+                    val_meta['loss']['val_total'] = val_meta['loss']['val_total'] + val_meta['loss']['val_guess_bce']
+
+                val_pred = val_pred.cpu().numpy()
+                val_pred_sum = val_pred.sum()
+                val_pred_cnt['total'] = val_pred_cnt['total'] + val_x.size()[0]
+                val_pred_cnt['true'] = val_pred_cnt['true'] + val_pred_sum
                 if guess:
-                    guess_pred_eval = guess_pred_eval.cpu().numpy()
-                    pred_cnt['guess_true_pos'] = pred_cnt['guess_true_pos'] + guess_pred_eval[pred_eval == 1].sum()
-                    pred_cnt['guess_true_neg'] = pred_cnt['guess_true_neg'] + (guess_pred_eval[pred_eval == 0] == 0).sum()
-                    pred_cnt['guess_false_pos'] = pred_cnt['guess_false_pos'] + (guess_pred_eval[pred_eval == 0] == 1).sum()
-                    pred_cnt['guess_false_neg'] = pred_cnt['guess_false_neg'] + (guess_pred_eval[pred_eval == 1] == 0).sum()
-                    if partial_set_sampling:
-                        passed = (guess_pred_eval == 0)
-                        extended_indices.extend([idx.item() for i, idx in enumerate(x_idx) if passed[i]])
+                    val_guess_pred = val_guess_pred.cpu().numpy()
+                    val_pred_cnt['guess_true_pos'] = val_pred_cnt['guess_true_pos'] + val_guess_pred[val_pred == 1].sum()
+                    val_pred_cnt['guess_true_neg'] = val_pred_cnt['guess_true_neg'] + (val_guess_pred[val_pred == 0] == 0).sum()
 
-                distr['z_means'].append(z_mean_eval.clone().detach().cpu().numpy())
-                distr['y_labels'].append(target.clone().detach().cpu().numpy())
-                distr['i_successes'].append(pred_eval)
+                if (i + 1) % display_step == 0 or (i + 1) == len(train_dataloader):
+                    val_loss_print = f'>\t {i+1}-th iter:\t\t\t\t\t\tval_loss={val_loss:.2f},\tval_mse_loss={val_mse_loss:.3f},\tval_ce_loss={val_ce_loss:.2f}\tval_kl_loss={val_kl_loss:.5f}'
+                    if partial_training:
+                        val_meta['acc']['val_partial_acc'] = val_pred_cnt["true"] / val_pred_cnt["total"]
+                        val_accuracy = val_meta['acc']['val_partial_acc']
+                        val_acc_print = f' \t               \t\t\t\t\t\tval_partial_acc={val_accuracy:.2f}'
+                    else:
+                        val_meta['acc']['val_acc'] = val_pred_cnt["true"] / val_pred_cnt["total"]
+                        val_accuracy = val_meta['acc']['val_acc']
+                        val_acc_print = f' \t               \t\t\t\t\t\tval_accuracy={val_accuracy:.2f}'
+                    if guess:
+                        val_loss_print += f'\tval_guess_bce_loss={val_guess_bce_loss:.5f}'
+                        val_meta['acc']['val_guess_acc'] = (val_pred_cnt["guess_true_pos"] + val_pred_cnt["guess_true_neg"]) / val_pred_cnt["total"]
+                        val_guess_acc = val_meta['acc']['val_guess_acc']
+                        val_acc_print += f' \t               \t\t\t\t\t\tval_guess_acc={val_guess_acc:.2f}'
+                    print(val_loss_print)
+                    print(val_acc_print)
 
-                pred_cnt['total'] = pred_cnt['total'] + x.size()[0]
-                pred_cnt['true'] = pred_cnt['true'] + pred_eval_sum
+                    logger.scalars_summary(f'{args.tag}/train', val_meta['loss'], prev_iter + i + 1)
+                    logger.scalars_summary(f'{args.tag}/train_acc', val_meta['acc'], prev_iter + i + 1)
+                    val_losses['iter'].append(prev_iter + i)
+                    val_losses['loss'].append(val_loss)
+                    val_losses['mse_loss'].append(val_mse_loss)
+                    val_losses['ce_loss'].append(val_ce_loss)
+                    val_losses['kl_loss'].append(val_kl_loss)
+                    val_losses['accuracy'].append(val_accuracy)
+                    val_pred_cnt = {'total': 0, 'true': 0, 'guess_true_pos': 0, 'guess_true_neg': 0}
+                del val_loss, val_mse_loss, val_ce_loss, val_kl_loss
+            del val_x, val_y, val_target
             model.train()
 
-            if (i+1) % display_step == 0 or (i+1) == len(train_dataloader):
-                loss_print = f'>\t {i+1}-th iter:\tloss={loss:.2f},\tmse_loss={mse_loss:.3f},\tce_loss={ce_loss:.2f}\tkl_loss={kl_loss:.5f}'
-                if partial_training:
-                    meta['acc']['partial_acc'] = pred_cnt["true"] / pred_cnt["total"]
-                    accuracy = meta['acc']['partial_acc']
-                    acc_print = f' \t               \tpartial_acc={accuracy:.2f}'
-                else:
-                    meta['acc']['acc'] = pred_cnt["true"] / pred_cnt["total"]
-                    accuracy = meta['acc']['acc']
-                    acc_print = f' \t               \taccuracy={accuracy:.2f}'
-                if guess:
-                    loss_print += f'\tguess_bce_loss={guess_bce_loss:.5f}'
-                    meta['acc']['guess_acc'] = (pred_cnt["guess_true_pos"]+pred_cnt["guess_true_neg"]) / pred_cnt["total"]
-                    guess_acc = meta['acc']['guess_acc']
-                    acc_print += f' \t               \tguess_acc={guess_acc:.2f}'
-                if ge2e and ge2e_loss is not None:
-                    loss_print += f'\tge2e_loss={ge2e_loss:.5f}'
+        if (i + 1) == len(train_dataloader) and ((epoch + 1) % args.save_step == 0 or (epoch + 1) == epochs):
+            if not os.path.exists(args.ckpt_model_dir):
+                os.mkdir(args.ckpt_model_dir)
+            ckpt_model_filename = f'shallownet_{args.tag}_{epoch}epoch.ckpt'
+            torch.save({
+                'epoch': epoch,
+                'iter': prev_iter + i,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': opt.state_dict()
+            }, os.path.join(args.ckpt_model_dir, ckpt_model_filename))
+            print("> ", str(epoch), "th checkpoint is saved!")
 
-                print(loss_print)
-                print(acc_print)
-
-                logger.scalars_summary(f'{args.tag}/train', meta['loss'], prev_iter + i + 1)
-                logger.scalars_summary(f'{args.tag}/train_acc', meta['acc'], prev_iter + i + 1)
-                losses['iter'].append(prev_iter+i)
-                losses['loss'].append(loss)
-                losses['mse_loss'].append(mse_loss)
-                losses['ce_loss'].append(ce_loss)
-                losses['kl_loss'].append(kl_loss)
-                losses['accuracy'].append(accuracy)
-                pred_cnt = {'total': 0, 'true': 0,
-                            'guess_true_pos': 0, 'guess_true_neg': 0,
-                            'guess_false_pos': 0, 'guess_false_neg': 0}
-
-                if (epoch + 1) % log_step == 0 or (epoch + 1) == epochs:
-                    if (i + 1) == display_step:
-                        distr['z_means'] = np.concatenate(distr['z_means'], axis=0)
-                        distr['y_labels'] = np.concatenate(distr['y_labels'], axis=0)
-                        distr['i_successes'] = np.concatenate(distr['i_successes'], axis=0)
-
-                        fig = plot_results((distr['z_means'], distr['y_labels'], distr['i_successes']), tag=args.tag)
-                        img = fig2rgb_array(fig, expand=False)
-                        logger.image_summary(f'{args.tag}/train', img, prev_iter + i + 1, dataformats='HWC')
-                        plt.close(fig)
-
-                    if (i + 1) == len(train_dataloader):
-                        fig, ax = plt.subplots(1)
-                        ax.xaxis.tick_top()
-                        plt.gca().invert_yaxis()
-                        p = ax.pcolormesh(hist_pairs, cmap=plt.cm.Reds,
-                                          norm=colors.PowerNorm(gamma=0.5, vmax=int(len(train_dataset)*.1*.1)))
-                        fig.colorbar(p, label='freq (log scale)')
-                        ax.set_xlabel('target')
-                        ax.set_ylabel('pred')
-                        ax.set_title('Misclassification map')
-                        fig.savefig('test_hist_pairs.png')
-                        img = fig2rgb_array(fig, expand=False)
-                        logger.image_summary(f'{args.tag}/train_hist_pairs', img, epoch, dataformats='HWC')
-                        plt.close(fig)
-                        if log_step < 32:
-                            log_step = log_step * 2
-
-                distr = {'z_means': [], 'y_labels': [], 'i_successes': []}
-
-            del x, y, target
-            del loss, mse_loss, ce_loss, kl_loss
-            if guess:
-                del guess_bce_loss
-
-            if (i + 1) % eval_step == 0 or (i+1) == len(train_dataloader):
-                model.eval()
-                val_meta = {'loss': {}, 'acc': {}}
-
-                try:
-                    val_data = next(val_iter)
-                except StopIteration:
-                    val_iter = iter(val_dataloader)
-                    val_data = next(val_iter)
-                val_x_idx, val_x, val_target = val_data
-                val_x = val_x.to(device)
-                val_target = val_target.to(device)
-                with torch.no_grad():
-                    val_enc_kwargs = dict(guess=guess, conditional=conditional)
-                    val_y, (val_cl, val_z_sample, val_enc_intermediates) = model(val_x, enc_kwargs=val_enc_kwargs)
-                    val_z_mean = val_enc_intermediates['z_mean']
-                    val_z_log_var = val_enc_intermediates['z_log_var']
-                    val_pred = (torch.argmax(val_cl, dim=1) == val_target).detach()
-
-                    val_mse_loss = mse_fn(val_y, val_x)
-                    val_ce_loss = ce_fn(val_cl, val_target, **focal_kwargs)
-                    val_kl_loss = kl_fn(val_z_mean, val_z_log_var)
-                    val_loss = val_mse_loss + val_ce_loss + val_kl_loss
-
-                    val_meta['loss']['val_mse'] = val_mse_loss.clone().detach().cpu()
-                    val_meta['loss']['val_ce'] = val_ce_loss.clone().detach().cpu()
-                    val_meta['loss']['val_kl'] = val_kl_loss.clone().detach().cpu()
-                    val_meta['loss']['val_total'] = val_loss.clone().detach().cpu()
-
-                    if guess:
-                        val_guess_out = val_enc_intermediates['guess_out']
-                        val_guess_pred = ((val_guess_out >= .5) == val_pred.view(-1, 1)).detach()
-
-                        val_guess_bce_loss = guess_bce_fn(val_guess_out.double(), val_pred.double())
-                        val_meta['loss']['val_guess_bce'] = val_guess_bce_loss.clone().detach().cpu()
-
-                        val_loss = val_loss + val_guess_bce_loss
-                        val_meta['loss']['val_total'] = val_meta['loss']['val_total'] + val_meta['loss']['val_guess_bce']
-
-                    val_pred = val_pred.cpu().numpy()
-                    val_pred_sum = val_pred.sum()
-                    val_pred_cnt['total'] = val_pred_cnt['total'] + val_x.size()[0]
-                    val_pred_cnt['true'] = val_pred_cnt['true'] + val_pred_sum
-                    if guess:
-                        val_guess_pred = val_guess_pred.cpu().numpy()
-                        val_pred_cnt['guess_true_pos'] = val_pred_cnt['guess_true_pos'] + val_guess_pred[val_pred == 1].sum()
-                        val_pred_cnt['guess_true_neg'] = val_pred_cnt['guess_true_neg'] + (val_guess_pred[val_pred == 0] == 0).sum()
-
-                    if (i + 1) % display_step == 0 or (i + 1) == len(train_dataloader):
-                        val_loss_print = f'>\t {i+1}-th iter:\t\t\t\t\t\tval_loss={val_loss:.2f},\tval_mse_loss={val_mse_loss:.3f},\tval_ce_loss={val_ce_loss:.2f}\tval_kl_loss={val_kl_loss:.5f}'
-                        if partial_training:
-                            val_meta['acc']['val_partial_acc'] = val_pred_cnt["true"] / val_pred_cnt["total"]
-                            val_accuracy = val_meta['acc']['val_partial_acc']
-                            val_acc_print = f' \t               \t\t\t\t\t\tval_partial_acc={val_accuracy:.2f}'
-                        else:
-                            val_meta['acc']['val_acc'] = val_pred_cnt["true"] / val_pred_cnt["total"]
-                            val_accuracy = val_meta['acc']['val_acc']
-                            val_acc_print = f' \t               \t\t\t\t\t\tval_accuracy={val_accuracy:.2f}'
-                        if guess:
-                            val_loss_print += f'\tval_guess_bce_loss={val_guess_bce_loss:.5f}'
-                            val_meta['acc']['val_guess_acc'] = (val_pred_cnt["guess_true_pos"] + val_pred_cnt["guess_true_neg"]) / val_pred_cnt["total"]
-                            val_guess_acc = val_meta['acc']['val_guess_acc']
-                            val_acc_print += f' \t               \t\t\t\t\t\tval_guess_acc={val_guess_acc:.2f}'
-                        print(val_loss_print)
-                        print(val_acc_print)
-
-                        logger.scalars_summary(f'{args.tag}/train', val_meta['loss'], prev_iter + i + 1)
-                        logger.scalars_summary(f'{args.tag}/train_acc', val_meta['acc'], prev_iter + i + 1)
-                        val_losses['iter'].append(prev_iter + i)
-                        val_losses['loss'].append(val_loss)
-                        val_losses['mse_loss'].append(val_mse_loss)
-                        val_losses['ce_loss'].append(val_ce_loss)
-                        val_losses['kl_loss'].append(val_kl_loss)
-                        val_losses['accuracy'].append(val_accuracy)
-                        val_pred_cnt = {'total': 0, 'true': 0, 'guess_true_pos': 0, 'guess_true_neg': 0}
-                    del val_loss, val_mse_loss, val_ce_loss, val_kl_loss
-                del val_x, val_y, val_target
-                model.train()
-
-            if (i + 1) == len(train_dataloader) and ((epoch + 1) % args.save_step == 0 or (epoch + 1) == epochs):
-                if not os.path.exists(args.ckpt_model_dir):
-                    os.mkdir(args.ckpt_model_dir)
-                ckpt_model_filename = f'shallownet_{args.tag}_{epoch}epoch.ckpt'
-                torch.save({
-                    'epoch': epoch,
-                    'iter': prev_iter + i,
-                    'model_state_dict': model.state_dict(),
-                    'optimizer_state_dict': opt.state_dict()
-                }, os.path.join(args.ckpt_model_dir, ckpt_model_filename))
-                print("> ", str(epoch), "th checkpoint is saved!")
-
-        times_per_epoch.append(time.time() - start)
-        print(f'   {epoch}-th epoch <<< processing time: '
-              f'{int((times_per_epoch[-1])/3600)}:{int((times_per_epoch[-1])%3600/60)}:{(times_per_epoch[-1])%60:.3f}')
-        prev_iter = prev_iter + len(train_dataloader)
-
-    return {'losses': losses,
-            'val_losses': val_losses,
-            'proc_time_per_epoch': times_per_epoch}
-
+    return losses, val_losses
 
 def plot_result(result, tag=None):
     fig, axes = plt.subplots(nrows=2, ncols=1, figsize=(15, 12))
@@ -597,14 +470,157 @@ def main_worker(gpu, ngpus_per_node, args):
     print(f'# parameters: {sum(p.numel() for p in model.parameters())}')
     opt = torch.optim.Adam(model.parameters(), 1e-3)
 
-    print('training the model ...')
 
-    result = train(model=model, opt=opt, device=device, mp_distributed=args.multiprocessing_distributed,
-                   train_dataloader=train_dl, train_dataset=train_dataset,
-                   val_dataloader=val_dl,
-                   train_sampler=train_sampler, val_sampler=val_sampler,
-                   eval_step=pow(2, math.floor(math.log2(int(1/args.val_set_ratio)))),
-                   init_epoch=init_epoch, init_iter=init_iter, epochs=args.epochs, display_step=args.display_step)
+    print('training the model ...')
+    logger = Logger()
+
+    def build_decorate_data_parallel_criterion(is_distributed, is_data_parallel):
+        def _decorate_data_parallel_criterion(fn):
+            if is_distributed:
+                return fn.to(device)
+            elif is_data_parallel:
+                return DataParallelCriterion(fn)
+            else:
+                return fn
+        return _decorate_data_parallel_criterion
+    dec = build_decorate_data_parallel_criterion(mp_distributed,
+                                                 args.data_parallel and args.data_parallel_loss_parallel)
+
+    mse_fn = dec(torch.nn.MSELoss())
+    ce_fn = dec(build_focal_loss(args.gamma) if args.focal_loss else torch.nn.CrossEntropyLoss())
+    kl_fn = dec(KLLoss)
+    guess_bce_fn = dec(torch.nn.BCELoss())
+    criteria_kwargs = dict(mse_fn=mse_fn, ce_fn=ce_fn, kl_fn=kl_fn, guess_bce_fn=guess_bce_fn)
+
+    gamma_scaling_fn = None
+    if args.focal_loss:
+        def build_gamma_scaling_fn(function):
+            def scaling_sigmoid(x, offset, width_factor=20):
+                return sigmoid((x-offset) * 4 / width_factor)
+
+            def scaling_cos(x, offset, pre_offset=False, T=20):
+                x_tilde = x - offset
+                if not pre_offset:
+                    x_tilde = max(x_tilde, 0)
+                return (-math.cos(x_tilde / T*(2*math.pi)) + 1) / 2
+
+            if function == 'sigmoid':
+                return scaling_sigmoid
+            elif function == 'cos':
+                return scaling_cos
+
+        gamma_scaling_fn = build_gamma_scaling_fn(args.gamma_scaling_function)
+
+    losses = {'iter': [],
+              'loss': [], 'mse_loss': [], 'ce_loss': [], 'kl_loss': [],
+              'guess_bce_loss': [],
+              'accuracy': []}
+    val_losses = {'iter': [],
+                  'loss': [], 'mse_loss': [], 'ce_loss': [], 'kl_loss': [],
+                  'guess_bce_loss': [],
+                  'accuracy': []}
+
+    log_step = 4
+    extended_indices = []
+    extended_clock = 1
+    prev_iter = init_iter
+
+    times_per_epoch = []
+
+    orig_train_dataloader = train_dl
+
+    for epoch in range(init_epoch, args.epochs):
+        print(f':: {epoch}-th epoch >>>')
+        start = time.time()
+
+        if args.multiprocessing_distributed:
+            train_sampler.set_epoch(epoch)
+
+        guess = (epoch + 1) > args.guess_trigger_epoch and args.guess
+        ge2e = (epoch + 1) > args.ge2e_trigger_epoch and args.ge2e_loss
+        conditional = (epoch + 1) > args.conditional_trigger_epoch and args.conditional_batch_norm
+        partial_training = None
+        partial_set_sampling = False
+
+        if guess:
+            if args.partial_training:
+                if extended_clock == 0:
+                    print(f'extended_clock: {extended_clock}, extended_indices: {len(extended_indices)}')
+                    if len(extended_indices) > 0:
+                        print(f'extended_indices[{len(extended_indices)}]')
+                        train_dataloader = DataLoader(dataset=torch.utils.data.Subset(train_dataset, extended_indices),
+                                                      batch_size=args.batch_size,
+                                                      sampler=train_sampler,
+                                                      shuffle=(train_sampler is None),
+                                                      drop_last=True,
+                                                      pin_memory=True)
+                        print(f'train_dataloader (for sampling): {len(train_dataloader)}')
+                        extended_clock = args.extended_clock_timer
+                        for p in model.parameters():
+                            p.requires_grad = False
+                        for p in model.encoder.bns.parameters():
+                            p.requires_grad = True
+
+                        partial_training = True
+
+                    else:
+                        print(f'train_dataloader <- orig_train_dataloader {len(train_dataloader)}')
+                        train_dataloader = orig_train_dataloader
+                        extended_clock = 5
+                        for p in model.parameters():
+                            p.requires_grad = True
+                        for p in model.encoder.bns.parameters():
+                            p.requires_grad = False
+
+                        partial_training = False
+
+                else:
+                    extended_clock = max(extended_clock - 1, 0)
+
+                    if extended_clock == 0:
+                        train_dataloader = orig_train_dataloader
+
+                        partial_set_sampling = not (args.fixed_partial_set and len(extended_indices) > 0)
+                        if partial_set_sampling:
+                            print(f'train_dataloader (for measurement): {len(train_dataloader)}')
+                            extended_indices = []
+                        else:
+                            print(f'train_dataloader (for entire set): {len(train_dataloader)}')
+
+                        for p in model.parameters():
+                            p.requires_grad = True
+                        for p in model.encoder.bns.parameters():
+                            p.requires_grad = False
+
+                        partial_training = False
+
+                    else:
+                        partial_training = True
+
+        focal_kwargs = {}
+        if args.focal_loss:
+            scaling_factor = gamma_scaling_fn(epoch, 3 / 5 * args.epochs - 1)
+            focal_kwargs = dict(gamma=(args.gamma * scaling_factor))
+            print(f'> scaling_factor: {scaling_factor}')
+        print(f'> focal_kwargs: {focal_kwargs}')
+
+        ext_training = (extended_clock > 0) if args.extended_layers else False
+
+        config_kwargs = dict(guess=guess, ge2e=ge2e, conditional=conditional, ext_training=ext_training,
+                             partial_training=partial_training, partial_set_sampling=partial_set_sampling,
+                             focal_kwargs=focal_kwargs)
+
+        _losses, _val_losses = train(model=model, opt=opt, device=device, logger=logger, args,
+              train_dataloader=train_dl, train_dataset=train_dataset,
+              val_dataloader=val_dl,
+              eval_step=args.eval_step,
+              epoch=epoch, prev_iter=prev_iter, display_step=args.display_step,
+              **criteria_kwargs, **config_kwargs)
+
+        times_per_epoch.append(time.time() - start)
+        print(f'   {epoch}-th epoch <<< processing time: '
+              f'{int((times_per_epoch[-1])/3600)}:{int((times_per_epoch[-1])%3600/60)}:{(times_per_epoch[-1])%60:.3f}')
+        prev_iter = prev_iter + len(train_dl)
 
     # plot_result(result, tag=args.tag)
 
@@ -688,6 +704,8 @@ if __name__ == "__main__":
             args.ge2e_trigger_epoch = int(args.epochs * 2/3)
     else:
         args.ge2e_trigger_epoch = args.epochs
+
+    args.eval_step = pow(2, math.floor(math.log2(int(1 / args.val_set_ratio))))
 
     print(f'args: {args}')
     main()
