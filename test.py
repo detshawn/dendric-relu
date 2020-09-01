@@ -18,6 +18,51 @@ from model.shallownet import ShallowNet
 from argparse import ArgumentParser
 import yaml
 
+parser = ArgumentParser()
+parser.add_argument('-config', required=True)
+parser.add_argument('-batch-size', default=8, type=int)
+parser.add_argument('-epochs', default=64, type=int)
+parser.add_argument('-extended-clock-timer', default=10, type=int)
+parser.add_argument('-tag', default='nonetag')
+parser.add_argument('--dendric', action='store_true')
+parser.add_argument('-val-set-ratio', default=0.1, type=float)
+parser.add_argument('-display-step', default=256, type=int)
+parser.add_argument('-save-step', default=50, type=int)
+parser.add_argument('-multi-position', default=1, type=int)
+
+parser.add_argument('--focal-loss', action='store_true')
+parser.add_argument('-gamma', default=2, type=float)
+parser.add_argument('-gamma-scaling-function', default='sigmoid')
+
+parser.add_argument('--ge2e-loss', action='store_true')
+parser.add_argument('-ge2e-step', default=16, type=float)
+parser.add_argument('-ge2e-trigger-epoch', type=int)
+
+parser.add_argument('--guess', action='store_true')
+parser.add_argument('--partial-training', action='store_true')
+parser.add_argument('--fixed-partial-set', action='store_true')
+parser.add_argument('--extended-layers', action='store_true')
+parser.add_argument('--conditional-batch-norm', action='store_true')
+parser.add_argument('-guess-trigger-epoch', type=int)
+parser.add_argument('-conditional-trigger-epoch', type=int)
+
+parser.add_argument('-ckpt-model-dir', default='./ckpts/')
+parser.add_argument('--load-model', action='store_true')
+parser.add_argument('-load-model-path')
+parser.add_argument('-mnist-data-path', default='../mnist')
+
+parser.add_argument('-gpu', default=None, type=int,
+                    help='GPU id to use.')
+parser.add_argument('--world-size', default=-1, type=int,
+                    help='number of nodes for distributed training')
+parser.add_argument('-rank', default=-1, type=int,
+                    help='node rank for distributed training')
+parser.add_argument('--data-parallel', action='store_true')
+parser.add_argument('-data-parallel-loss-parallel', default=False, type=bool)
+parser.add_argument('--multiprocessing-distributed', action='store_true',
+                    help='Use multi-processing distributed training to launch '
+                         'N processes per node, which has N GPUs.')
+
 
 class MNISTDataset(Dataset):
     def __init__(self, images, labels):
@@ -622,66 +667,8 @@ def main_worker(gpu, ngpus_per_node, args):
         print(f'   {epoch}-th epoch <<< processing time: '
               f'{int((times_per_epoch[-1])/3600)}:{int((times_per_epoch[-1])%3600/60)}:{(times_per_epoch[-1])%60:.3f}')
 
+
 def main():
-    if args.world_size == -1:
-        # Node is currently set to 1 since this script is written for a single-hardware case
-        args.world_size = 1  # int(os.environ["WORLD_SIZE"])
-    ngpus_per_node = torch.cuda.device_count()
-    if args.multiprocessing_distributed:
-        # Since we have ngpus_per_node processes per node, the total world_size
-        # needs to be adjusted accordingly
-        args.world_size = ngpus_per_node * args.world_size
-        mp.spawn(main_worker, nprocs=ngpus_per_node, args=(ngpus_per_node, args))
-    else:
-        main_worker(args.gpu, ngpus_per_node, args)
-
-
-if __name__ == "__main__":
-    parser = ArgumentParser()
-    parser.add_argument('-config', required=True)
-    parser.add_argument('-batch-size', default=8, type=int)
-    parser.add_argument('-epochs', default=64, type=int)
-    parser.add_argument('-extended-clock-timer', default=10, type=int)
-    parser.add_argument('-tag', default='nonetag')
-    parser.add_argument('--dendric', action='store_true')
-    parser.add_argument('-val-set-ratio', default=0.1, type=float)
-    parser.add_argument('-display-step', default=256, type=int)
-    parser.add_argument('-save-step', default=50, type=int)
-    parser.add_argument('-multi-position', default=1, type=int)
-
-    parser.add_argument('--focal-loss', action='store_true')
-    parser.add_argument('-gamma', default=2, type=float)
-    parser.add_argument('-gamma-scaling-function', default='sigmoid')
-
-    parser.add_argument('--ge2e-loss', action='store_true')
-    parser.add_argument('-ge2e-step', default=16, type=float)
-    parser.add_argument('-ge2e-trigger-epoch', type=int)
-
-    parser.add_argument('--guess', action='store_true')
-    parser.add_argument('--partial-training', action='store_true')
-    parser.add_argument('--fixed-partial-set', action='store_true')
-    parser.add_argument('--extended-layers', action='store_true')
-    parser.add_argument('--conditional-batch-norm', action='store_true')
-    parser.add_argument('-guess-trigger-epoch', type=int)
-    parser.add_argument('-conditional-trigger-epoch', type=int)
-
-    parser.add_argument('-ckpt-model-dir', default='./ckpts/')
-    parser.add_argument('--load-model', action='store_true')
-    parser.add_argument('-load-model-path')
-    parser.add_argument('-mnist-data-path', default='../mnist')
-
-    parser.add_argument('-gpu', default=None, type=int,
-                        help='GPU id to use.')
-    parser.add_argument('--world-size', default=-1, type=int,
-                        help='number of nodes for distributed training')
-    parser.add_argument('-rank', default=-1, type=int,
-                        help='node rank for distributed training')
-    parser.add_argument('--data-parallel', action='store_true')
-    parser.add_argument('-data-parallel-loss-parallel', default=False, type=bool)
-    parser.add_argument('--multiprocessing-distributed', action='store_true',
-                        help='Use multi-processing distributed training to launch '
-                             'N processes per node, which has N GPUs.')
-
     args = parser.parse_args()
 
     if args.guess:
@@ -704,5 +691,18 @@ if __name__ == "__main__":
 
     args.eval_step = pow(2, math.floor(math.log2(int(1 / args.val_set_ratio))))
 
-    print(f'args: {args}')
+    if args.world_size == -1:
+        # Node is currently set to 1 since this script is written for a single-hardware case
+        args.world_size = 1  # int(os.environ["WORLD_SIZE"])
+    ngpus_per_node = torch.cuda.device_count()
+    if args.multiprocessing_distributed:
+        # Since we have ngpus_per_node processes per node, the total world_size
+        # needs to be adjusted accordingly
+        args.world_size = ngpus_per_node * args.world_size
+        mp.spawn(main_worker, nprocs=ngpus_per_node, args=(ngpus_per_node, args))
+    else:
+        main_worker(args.gpu, ngpus_per_node, args)
+
+
+if __name__ == "__main__":
     main()
