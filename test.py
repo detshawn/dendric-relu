@@ -55,8 +55,6 @@ def test_activation_functions():
 
 def train(model, opt, device, logger, args,
           train_dataloader, train_dataset,
-          val_dataloader,
-          eval_step,
           epoch, prev_iter, display_step, is_logging,
           final_epoch=False,
           mse_fn=None, ce_fn=None, kl_fn=None, guess_bce_fn=None,
@@ -99,8 +97,6 @@ def train(model, opt, device, logger, args,
     pred_cnt = {'total': 0, 'true': 0,
                 'guess_true_pos': 0, 'guess_true_neg': 0,
                 'guess_false_pos': 0, 'guess_false_neg': 0}
-    val_pred_cnt = {'total': 0, 'true': 0, 'guess_true_pos': 0, 'guess_true_neg': 0}
-    val_iter = iter(val_dataloader)
     distr = {'z_means': [], 'y_labels': [], 'i_successes': []}
 
     hist_pairs = np.zeros((10, 10))
@@ -137,7 +133,6 @@ def train(model, opt, device, logger, args,
         ce_loss_meter.update(ce_loss.item())
         kl_loss_meter.update(kl_loss.item())
 
-        ge2e_loss = None
         if ge2e:
             for emb, t in zip(z_mean, target):
                 embeds_for_ge2e[t].append(emb)
@@ -260,78 +255,115 @@ def train(model, opt, device, logger, args,
         if guess:
             del guess_bce_loss
 
-        # if (i + 1) % eval_step == 0 or (i+1) == len(train_dataloader):
-        #     model.eval()
-        #     val_meta = {'loss': {}, 'acc': {}}
-        #
-        #     try:
-        #         val_data = next(val_iter)
-        #     except StopIteration:
-        #         val_iter = iter(val_dataloader)
-        #         val_data = next(val_iter)
-        #     val_x_idx, val_x, val_target = val_data
-        #     val_x = val_x.to(device)
-        #     val_target = val_target.to(device)
-        #     with torch.no_grad():
-        #         val_enc_kwargs = dict(guess=guess, conditional=conditional)
-        #         val_y, (val_cl, val_z_sample, val_enc_intermediates) = model(val_x, enc_kwargs=val_enc_kwargs)
-        #         val_z_mean = val_enc_intermediates['z_mean']
-        #         val_z_log_var = val_enc_intermediates['z_log_var']
-        #         val_pred = (torch.argmax(val_cl, dim=1) == val_target).detach()
-        #
-        #         val_mse_loss = mse_fn(val_y, val_x)
-        #         val_ce_loss = ce_fn(val_cl, val_target, **focal_kwargs)
-        #         val_kl_loss = kl_fn(val_z_mean, val_z_log_var)
-        #         val_loss = val_mse_loss + val_ce_loss + val_kl_loss
-        #
-        #         val_meta['loss']['val_mse'] = val_mse_loss.clone().detach().cpu()
-        #         val_meta['loss']['val_ce'] = val_ce_loss.clone().detach().cpu()
-        #         val_meta['loss']['val_kl'] = val_kl_loss.clone().detach().cpu()
-        #         val_meta['loss']['val_total'] = val_loss.clone().detach().cpu()
-        #
-        #         if guess:
-        #             val_guess_out = val_enc_intermediates['guess_out']
-        #             val_guess_pred = ((val_guess_out >= .5) == val_pred.view(-1, 1)).detach()
-        #
-        #             val_guess_bce_loss = guess_bce_fn(val_guess_out.double(), val_pred.double())
-        #             val_meta['loss']['val_guess_bce'] = val_guess_bce_loss.clone().detach().cpu()
-        #
-        #             val_loss = val_loss + val_guess_bce_loss
-        #             val_meta['loss']['val_total'] = val_meta['loss']['val_total'] + val_meta['loss']['val_guess_bce']
-        #
-        #         val_pred = val_pred.cpu().numpy()
-        #         val_pred_sum = val_pred.sum()
-        #         val_pred_cnt['total'] = val_pred_cnt['total'] + val_x.size()[0]
-        #         val_pred_cnt['true'] = val_pred_cnt['true'] + val_pred_sum
-        #         if guess:
-        #             val_guess_pred = val_guess_pred.cpu().numpy()
-        #             val_pred_cnt['guess_true_pos'] = val_pred_cnt['guess_true_pos'] + val_guess_pred[val_pred == 1].sum()
-        #             val_pred_cnt['guess_true_neg'] = val_pred_cnt['guess_true_neg'] + (val_guess_pred[val_pred == 0] == 0).sum()
-        #
-        #         if (i + 1) % display_step == 0 or (i + 1) == len(train_dataloader):
-        #             val_loss_print = f'>\t {i+1}-th iter:\t\t\t\t\t\tval_loss={val_loss:.2f},\tval_mse_loss={val_mse_loss:.3f},\tval_ce_loss={val_ce_loss:.2f}\tval_kl_loss={val_kl_loss:.5f}'
-        #             if partial_training:
-        #                 val_meta['acc']['val_partial_acc'] = val_pred_cnt["true"] / val_pred_cnt["total"]
-        #                 val_accuracy = val_meta['acc']['val_partial_acc']
-        #                 val_acc_print = f' \t               \t\t\t\t\t\tval_partial_acc={val_accuracy:.2f}'
-        #             else:
-        #                 val_meta['acc']['val_acc'] = val_pred_cnt["true"] / val_pred_cnt["total"]
-        #                 val_accuracy = val_meta['acc']['val_acc']
-        #                 val_acc_print = f' \t               \t\t\t\t\t\tval_accuracy={val_accuracy:.2f}'
-        #             if guess:
-        #                 val_loss_print += f'\tval_guess_bce_loss={val_guess_bce_loss:.5f}'
-        #                 val_meta['acc']['val_guess_acc'] = (val_pred_cnt["guess_true_pos"] + val_pred_cnt["guess_true_neg"]) / val_pred_cnt["total"]
-        #                 val_guess_acc = val_meta['acc']['val_guess_acc']
-        #                 val_acc_print += f' \t               \t\t\t\t\t\tval_guess_acc={val_guess_acc:.2f}'
-        #             print(val_loss_print)
-        #             print(val_acc_print)
-        #
-        #             logger.scalars_summary(f'{args.tag}/train', val_meta['loss'], prev_iter + i + 1)
-        #             logger.scalars_summary(f'{args.tag}/train_acc', val_meta['acc'], prev_iter + i + 1)
-        #             val_pred_cnt = {'total': 0, 'true': 0, 'guess_true_pos': 0, 'guess_true_neg': 0}
-        #         del val_loss, val_mse_loss, val_ce_loss, val_kl_loss
-        #     del val_x, val_y, val_target
-        #     model.train()
+        # measure the batch time
+        batch_time.update(time.time() - end)
+        end = time.time()
+
+
+def validate(model, device, logger, args,
+             val_dataloader,
+             epoch, prev_iter,
+             mse_fn=None, ce_fn=None, kl_fn=None, guess_bce_fn=None,
+             guess=False, ge2e=False, conditional=False, ext_training=False,
+             partial_training=None, partial_set_sampling=False,
+             focal_kwargs=None):
+
+    batch_time = AverageMeter('Time', ':6.3f')
+    data_time = AverageMeter('Data', ':6.3f')
+    progress_list = [batch_time, data_time]
+    loss_meter = AverageMeter('Val Loss', ':.4e')
+    mse_loss_meter = AverageMeter('Val MSE Loss', ':.4e')
+    ce_loss_meter = AverageMeter('Val CE Loss', ':.4e')
+    kl_loss_meter = AverageMeter('Val KL Loss', ':.4e')
+    val_losses = [loss_meter, mse_loss_meter, ce_loss_meter, kl_loss_meter]
+    if ge2e:
+        ge2e_loss_meter = AverageMeter('Val GE2E Loss', ':.4e')
+        val_losses.append(ge2e_loss_meter)
+    if guess:
+        guess_bce_loss_meter = AverageMeter('Val Guess BCE Loss', ':.4e')
+        val_losses.append(guess_bce_loss_meter)
+    progress_list.extend(val_losses)
+    val_losses = AverageMeterList(val_losses)
+    if partial_training:
+        partial_acc_meter = AverageMeter('Val Partial Acc', ':.4e')
+        val_accs = [partial_acc_meter]
+    else:
+        acc_meter = AverageMeter('Val Acc', ':6.2f')
+        val_accs = [acc_meter]
+    if guess:
+        guess_acc_meter = AverageMeter('Val Guess Acc', ':.4e')
+        val_accs.append(guess_acc_meter)
+    progress_list.extend(val_accs)
+    val_accs = AverageMeterList(val_accs)
+
+    progress = ProgressMeter(len(val_dataloader), progress_list, prefix="Epoch: [{}]".format(epoch))
+
+    val_pred_cnt = {'total': 0, 'true': 0, 'guess_true_pos': 0, 'guess_true_neg': 0}
+
+    model.eval()
+
+    end = time.time()
+    for i, val_data in enumerate(iter(val_dataloader)):
+        # measure the data loading time
+        data_time.update(time.time() - end)
+
+        val_x_idx, val_x, val_target = val_data
+        val_x = val_x.to(device)
+        val_target = val_target.to(device)
+
+        with torch.no_grad():
+            val_enc_kwargs = dict(guess=guess, conditional=conditional)
+            val_y, (val_cl, val_z_sample, val_enc_intermediates) = model(val_x, enc_kwargs=val_enc_kwargs)
+            val_z_mean = val_enc_intermediates['z_mean']
+            val_z_log_var = val_enc_intermediates['z_log_var']
+            val_pred = (torch.argmax(val_cl, dim=1) == val_target).detach()
+
+            val_mse_loss = mse_fn(val_y, val_x)
+            val_ce_loss = ce_fn(val_cl, val_target, **focal_kwargs)
+            val_kl_loss = kl_fn(val_z_mean, val_z_log_var)
+            val_loss = val_mse_loss + val_ce_loss + val_kl_loss
+
+            mse_loss_meter.update(val_mse_loss.clone().detach().cpu())
+            ce_loss_meter.update(val_ce_loss.clone().detach().cpu())
+            kl_loss_meter.update(val_kl_loss.clone().detach().cpu())
+
+            if guess:
+                val_guess_out = val_enc_intermediates['guess_out']
+                val_guess_pred = ((val_guess_out >= .5) == val_pred.view(-1, 1)).detach()
+
+                val_guess_bce_loss = guess_bce_fn(val_guess_out.double(), val_pred.double())
+                guess_bce_loss_meter.update(val_guess_bce_loss.clone().detach().cpu())
+
+                val_loss = val_loss + val_guess_bce_loss
+
+            loss_meter.update(val_loss.clone().detach().cpu())
+
+            val_pred = val_pred.cpu().numpy()
+            val_pred_sum = val_pred.sum()
+            val_pred_cnt['total'] = val_pred_cnt['total'] + val_x.size()[0]
+            val_pred_cnt['true'] = val_pred_cnt['true'] + val_pred_sum
+            if guess:
+                val_guess_pred = val_guess_pred.cpu().numpy()
+                val_pred_cnt['guess_true_pos'] = val_pred_cnt['guess_true_pos'] + val_guess_pred[val_pred == 1].sum()
+                val_pred_cnt['guess_true_neg'] = val_pred_cnt['guess_true_neg'] + (val_guess_pred[val_pred == 0] == 0).sum()
+
+            del val_loss, val_mse_loss, val_ce_loss, val_kl_loss
+        del val_x, val_y, val_target
+
+        if (i + 1) == len(val_dataloader):
+            # acc calc
+            if partial_training:
+                partial_acc_meter.update(val_pred_cnt["true"], val_pred_cnt["total"])
+            else:
+                acc_meter.update(val_pred_cnt["true"], val_pred_cnt["total"])
+            if guess:
+                acc_meter.update((val_pred_cnt["guess_true_pos"] + val_pred_cnt["guess_true_neg"]), val_pred_cnt["total"])
+
+            progress.display(i)
+
+            logger.scalars_summary(f'{args.tag}/train', val_losses.list_to_dict(), prev_iter + 1)
+            logger.scalars_summary(f'{args.tag}/train_acc', val_accs.list_to_dict(), prev_iter + 1)
+            val_pred_cnt = {'total': 0, 'true': 0, 'guess_true_pos': 0, 'guess_true_neg': 0}
 
         # measure the batch time
         batch_time.update(time.time() - end)
@@ -428,7 +460,6 @@ def main_worker(gpu, ngpus_per_node, args):
     print(model)
     print(f'# parameters: {sum(p.numel() for p in model.parameters())}')
     opt = torch.optim.Adam(model.parameters(), 1e-3)
-
 
     print('training the model ...')
     logger = Logger()
@@ -558,18 +589,16 @@ def main_worker(gpu, ngpus_per_node, args):
 
         config_kwargs = dict(guess=guess, ge2e=ge2e, conditional=conditional, ext_training=ext_training,
                              partial_training=partial_training, partial_set_sampling=partial_set_sampling,
-                             focal_kwargs=focal_kwargs, final_epoch=((epoch + 1) == args.epochs))
+                             focal_kwargs=focal_kwargs)
 
         train(model=model, opt=opt, device=device, logger=logger, args=args,
               train_dataloader=train_dl, train_dataset=train_dataset,
-              val_dataloader=val_dl,
-              eval_step=args.eval_step,
-              epoch=epoch, prev_iter=prev_iter, display_step=args.display_step, is_logging = ((epoch + 1) % log_step == 0),
+              epoch=epoch, final_epoch=((epoch + 1) == args.epochs),
+              prev_iter=prev_iter, display_step=args.display_step, is_logging=((epoch + 1) % log_step == 0),
               **criteria_kwargs, **config_kwargs)
 
         if (epoch + 1) % log_step == 0 and log_step < 32:
             log_step = log_step * 2
-
 
         if (epoch + 1) % args.save_step == 0 or (epoch + 1) == args.epochs:
             if not os.path.exists(args.ckpt_model_dir):
@@ -583,11 +612,15 @@ def main_worker(gpu, ngpus_per_node, args):
             }, os.path.join(args.ckpt_model_dir, ckpt_model_filename))
             print("> ", str(epoch), "th checkpoint is saved!")
 
+        prev_iter = prev_iter + len(train_dl)
+
+        validate(model=model, device=device, logger=logger, args=args,
+                 val_dataloader=val_dl,
+                 epoch=epoch, prev_iter=prev_iter, **criteria_kwargs, **config_kwargs)
+
         times_per_epoch.append(time.time() - start)
         print(f'   {epoch}-th epoch <<< processing time: '
               f'{int((times_per_epoch[-1])/3600)}:{int((times_per_epoch[-1])%3600/60)}:{(times_per_epoch[-1])%60:.3f}')
-        prev_iter = prev_iter + len(train_dl)
-
 
 def main():
     if args.world_size == -1:
