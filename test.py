@@ -497,7 +497,7 @@ def main_worker(gpu, ngpus_per_node, args):
 
     if args.multiprocessing_distributed:
         model = model.to(device)
-        model = DistributedDataParallel(model, device_ids=[args.gpu])
+        model = DistributedDataParallel(model, device_ids=[args.gpu], find_unused_parameters=True)
     else:
         if args.data_parallel:
             if not args.data_parallel_loss_parallel:
