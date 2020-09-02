@@ -430,7 +430,7 @@ def main_worker(gpu, ngpus_per_node, args):
 
         print("Use GPU: {} for training".format(args.gpu))
         if args.rank == -1:
-            args.rank = int(os.environ["RANK"])
+            args.rank = 0  # int(os.environ["RANK"])
         args.rank = args.rank * ngpus_per_node + gpu
         dist.init_process_group(backend='nccl',
                                 init_method='tcp://127.0.0.1:6006',
