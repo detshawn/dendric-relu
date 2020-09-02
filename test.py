@@ -426,7 +426,7 @@ def main_worker(gpu, ngpus_per_node, args):
         device = "cuda"
         if args.gpu is not None:
             device = device + f":{args.gpu}"
-        torch.cuda.set_device(args.gpu)
+            torch.cuda.set_device(args.gpu)
 
         print("Use GPU: {} for training".format(args.gpu))
         if args.rank == -1:
