@@ -640,17 +640,19 @@ def main_worker(gpu, ngpus_per_node, args):
                              partial_training=partial_training, partial_set_sampling=partial_set_sampling,
                              focal_kwargs=focal_kwargs)
 
+        avoid_duplicated_logging = not (args.multiprocessing_distributed and args.gpu % ngpus_per_node != 0)
+        final_epoch = ((epoch + 1) == args.epochs) and avoid_duplicated_logging
+        is_logging = ((epoch + 1) % log_step == 0) and avoid_duplicated_logging
         train(model=model, opt=opt, device=device, logger=logger, args=args,
               train_dataloader=train_dl, train_dataset=train_dataset,
-              epoch=epoch, final_epoch=((epoch + 1) == args.epochs),
-              prev_iter=prev_iter, display_step=args.display_step, is_logging=((epoch + 1) % log_step == 0),
+              epoch=epoch, final_epoch=final_epoch,
+              prev_iter=prev_iter, display_step=args.display_step, is_logging=is_logging,
               **criteria_kwargs, **config_kwargs)
 
         if (epoch + 1) % log_step == 0 and log_step < 32:
             log_step = log_step * 2
 
-        if (epoch + 1) % args.save_step == 0 or (epoch + 1) == args.epochs and \
-                not (args.multiprocessing_distributed and args.gpu % ngpus_per_node != 0):
+        if (epoch + 1) % args.save_step == 0 or (epoch + 1) == args.epochs and avoid_duplicated_logging:
             if not os.path.exists(args.ckpt_model_dir):
                 os.mkdir(args.ckpt_model_dir)
             ckpt_model_filename = f'shallownet_{args.tag}_{epoch}epoch.ckpt'
