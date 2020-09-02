@@ -496,14 +496,16 @@ def main_worker(gpu, ngpus_per_node, args):
         init_epoch, init_iter = 0, 0
 
     if args.multiprocessing_distributed:
+        model = model.to(device)
         model = DistributedDataParallel(model, device_ids=[args.gpu])
-    elif args.data_parallel:
-        if not args.data_parallel_loss_parallel:
-            model = torch.nn.DataParallel(model)
-        else:
-            model = DataParallelModel(model)
+    else:
+        if args.data_parallel:
+            if not args.data_parallel_loss_parallel:
+                model = torch.nn.DataParallel(model)
+            else:
+                model = DataParallelModel(model)
+        model = model.to(device)
 
-    model = model.to(device)
     print(model)
     print(f'# parameters: {sum(p.numel() for p in model.parameters())}')
     opt = torch.optim.Adam(model.parameters(), 1e-3)
