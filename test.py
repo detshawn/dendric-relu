@@ -429,13 +429,15 @@ def main_worker(gpu, ngpus_per_node, args):
             torch.cuda.set_device(args.gpu)
 
         print("Use GPU: {} for training".format(args.gpu))
-        if args.rank == -1:
-            args.rank = 0  # int(os.environ["RANK"])
-        args.rank = args.rank * ngpus_per_node + gpu
-        dist.init_process_group(backend='nccl',
-                                init_method='tcp://127.0.0.1:6006',
-                                world_size=args.world_size,
-                                rank=args.rank)
+
+        if args.multiprocessing_distributed:
+            if args.rank == -1:
+                args.rank = 0  # int(os.environ["RANK"])
+            args.rank = args.rank * ngpus_per_node + gpu
+            dist.init_process_group(backend='nccl',
+                                    init_method='tcp://127.0.0.1:6006',
+                                    world_size=args.world_size,
+                                    rank=args.rank)
 
     batch_size = args.batch_size if device is not "cpu" else 4
 
