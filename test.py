@@ -649,7 +649,8 @@ def main_worker(gpu, ngpus_per_node, args):
         if (epoch + 1) % log_step == 0 and log_step < 32:
             log_step = log_step * 2
 
-        if (epoch + 1) % args.save_step == 0 or (epoch + 1) == args.epochs:
+        if (epoch + 1) % args.save_step == 0 or (epoch + 1) == args.epochs and \
+                not (args.multiprocessing_distributed and args.gpu % ngpus_per_node != 0):
             if not os.path.exists(args.ckpt_model_dir):
                 os.mkdir(args.ckpt_model_dir)
             ckpt_model_filename = f'shallownet_{args.tag}_{epoch}epoch.ckpt'
