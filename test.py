@@ -527,7 +527,7 @@ def main_worker(gpu, ngpus_per_node, args):
 
     mse_fn = dec(torch.nn.MSELoss())
     ce_fn = dec(build_focal_loss(args.gamma) if args.focal_loss else torch.nn.CrossEntropyLoss())
-    kl_fn = dec(KLLoss)
+    kl_fn = KLLoss
     guess_bce_fn = dec(torch.nn.BCELoss())
     criteria_kwargs = dict(mse_fn=mse_fn, ce_fn=ce_fn, kl_fn=kl_fn, guess_bce_fn=guess_bce_fn)
 
