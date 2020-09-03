@@ -7,6 +7,69 @@ import matplotlib.pyplot as plt
 import math
 
 
+class AverageMeter(object):
+    """Computes and stores the average and current value"""
+    def __init__(self, name, fmt=':f'):
+        self.name = name
+        self.fmt = fmt
+        self.reset()
+
+    def reset(self):
+        self.val = 0
+        self.avg = 0
+        self.sum = 0
+        self.count = 0
+
+    def update(self, val, n=1):
+        self.val = val
+        self.sum += val
+        self.count += n
+        self.avg = self.sum / self.count
+
+    def val_to_dict(self):
+        return {self.name: self.val}
+
+    def avg_to_dict(self):
+        return {self.name: self.avg}
+
+    def __str__(self):
+        fmtstr = '{name} {val' + self.fmt + '} ({avg' + self.fmt + '})'
+        return fmtstr.format(**self.__dict__)
+
+
+class AverageMeterList(object):
+    def __init__(self, meters):
+        self.meters = meters
+
+    def list_to_dict(self):
+        l = len(self.meters)
+        d = None
+        if l == 1:
+            d = dict(self.meters[0].avg_to_dict())
+        elif l > 1:
+            d = dict(self.meters[0].avg_to_dict(), **self.meters[1].avg_to_dict())
+            for meter in self.meters[2:]:
+                d.update(meter.avg_to_dict())
+        return d
+
+
+class ProgressMeter(object):
+    def __init__(self, num_batches, meters, prefix=""):
+        self.batch_fmtstr = self._get_batch_fmtstr(num_batches)
+        self.meters = meters
+        self.prefix = prefix
+
+    def display(self, batch):
+        entries = [self.prefix + self.batch_fmtstr.format(batch)]
+        entries += [str(meter) for meter in self.meters]
+        print('\t'.join(entries))
+
+    def _get_batch_fmtstr(self, num_batches):
+        num_digits = len(str(num_batches // 1))
+        fmt = '{:' + str(num_digits) + 'd}'
+        return '[' + fmt + '/' + fmt.format(num_batches) + ']'
+
+
 def sigmoid(x):
     return 1/(1+math.exp(-x))
 
