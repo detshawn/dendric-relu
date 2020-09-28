@@ -6,7 +6,7 @@
 ### Guess-Net based Border Training Enhancement
 #### Problem
 - Another part of ideas in this project was to test out the question: "How can the network more focus on the harder cases on the border?"
-- Conceptually, there already exists 'focal loss' solution for this, but the loss basically uses all the training set in the entire training period with the majority of samples which are barely effective in practice.
+- Conceptually, there already exists 'focal loss' solution for this, but the loss basically uses all the training set in the entire training period with the majority of well-classified samples which become gradually less effective and insignificant for the performance attribution in the training.
 
 #### Proposal
 - The main idea is to reserve some specific part of network for the harder problems on the border.
